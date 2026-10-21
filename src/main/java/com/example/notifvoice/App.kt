@@ -25,13 +25,14 @@ import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 import java.util.concurrent.Executors
 
 const val DEFAULT_KEY = ""
-const val DEFAULT_MODEL = "gemini-2.5-flash-preview-tts"
+const val DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"
 const val DEFAULT_VOICE = "Kore"
 
 class MainActivity : Activity() {
@@ -57,10 +58,14 @@ class MainActivity : Activity() {
             setPadding(0, pad, 0, 0)
         }
 
-        val keyBox = EditText(this).apply {
-            hint = "Gemini API Key"
-            setSingleLine()
-            setText(prefs.getString("key", DEFAULT_KEY))
+        val keyBoxes = (1..Speaker.SLOTS).map { i ->
+            EditText(this).apply {
+                hint = "Gemini API Key $i"
+                setSingleLine()
+                val v = if (i == 1) prefs.getString("key1", prefs.getString("key", DEFAULT_KEY))
+                else prefs.getString("key$i", "")
+                setText(v)
+            }
         }
         val modelBox = EditText(this).apply {
             setSingleLine()
@@ -97,11 +102,14 @@ class MainActivity : Activity() {
         val saveBtn = Button(this).apply {
             text = "৩. সেটিংস সেভ করুন"
             setOnClickListener {
-                prefs.edit()
-                    .putString("key", keyBox.text.toString().trim())
-                    .putString("model", modelBox.text.toString().trim())
-                    .putString("voice", voiceBox.selectedItem.toString())
-                    .apply()
+                val ed = prefs.edit()
+                keyBoxes.forEachIndexed { idx, box ->
+                    ed.putString("key${idx + 1}", box.text.toString().trim())
+                }
+                ed.putString("model", modelBox.text.toString().trim())
+                ed.putString("voice", voiceBox.selectedItem.toString())
+                ed.putInt("lastSlot", 1)
+                ed.apply()
                 Toast.makeText(this@MainActivity, "সেভ হয়েছে", Toast.LENGTH_SHORT).show()
             }
         }
@@ -117,7 +125,7 @@ class MainActivity : Activity() {
                     runOnUiThread {
                         Toast.makeText(
                             this@MainActivity,
-                            err ?: "পরীক্ষা সফল",
+                            err ?: "পরীক্ষা সফল (key ${Speaker.lastUsedSlot})",
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -125,8 +133,8 @@ class MainActivity : Activity() {
             }
         }
 
-        root.addView(label("Gemini API Key (বদলাতে চাইলে ঘরের লেখা মুছে নতুন key বসিয়ে \"সেটিংস সেভ করুন\" চাপুন)"))
-        root.addView(keyBox)
+        root.addView(label("Gemini API Key (একটায় ত্রুটি হলে নিজে পরেরটায় যাবে। দরকার নেই এমন ঘর ফাঁকা রাখুন। বদলাতে চাইলে মুছে নতুন বসিয়ে \"সেটিংস সেভ করুন\" চাপুন)"))
+        keyBoxes.forEach { root.addView(it) }
         root.addView(label("মডেল (সাধারণত বদলাতে হয় না)"))
         root.addView(modelBox)
         root.addView(label("ভয়েস বেছে নিন (বেছে সেভ করে \"ভয়েস পরীক্ষা করুন\" চাপলে শুনতে পাবেন)"))
@@ -188,34 +196,75 @@ class MainActivity : Activity() {
 object Speaker {
 
     private const val SAMPLE_RATE = 24000
+    const val SLOTS = 5
 
+    @Volatile
+    var lastUsedSlot = 0
+
+    private class Result(val pcm: ByteArray?, val error: String?)
+
+    /** সফল হলে null, ব্যর্থ হলে ত্রুটির বার্তা। ব্যাকগ্রাউন্ড থ্রেডে চালাতে হবে। */
     fun speakGemini(ctx: Context, text: String): String? {
         val prefs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
-        val key = prefs.getString("key", DEFAULT_KEY).orEmpty().trim()
         val model = prefs.getString("model", DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
         val voice = prefs.getString("voice", DEFAULT_VOICE).orEmpty().ifEmpty { DEFAULT_VOICE }
-        if (key.isEmpty()) return "API key দেওয়া হয়নি"
 
-        return try {
-            val body = JSONObject().apply {
-                put("contents", JSONArray().put(JSONObject().apply {
-                    put("parts", JSONArray().put(JSONObject().put("text", text)))
-                }))
-                put("generationConfig", JSONObject().apply {
-                    put("responseModalities", JSONArray().put("AUDIO"))
-                    put("speechConfig", JSONObject().apply {
-                        put("voiceConfig", JSONObject().apply {
-                            put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice))
-                        })
+        val slots = (1..SLOTS).mapNotNull { i ->
+            val k = prefs.getString(
+                "key$i",
+                if (i == 1) prefs.getString("key", DEFAULT_KEY) else ""
+            ).orEmpty().trim()
+            if (k.isEmpty()) null else i to k
+        }
+        if (slots.isEmpty()) return "API key দেওয়া হয়নি"
+
+        // শেষ যে key চলেছিল সেটা দিয়ে শুরু, তারপর পরের গুলো
+        val start = prefs.getInt("lastSlot", 1)
+        val ordered = slots.sortedBy { (it.first - start + SLOTS) % SLOTS }
+
+        val errors = ArrayList<String>()
+        for ((slot, key) in ordered) {
+            try {
+                val r = request(key, model, voice, text)
+                val pcm = r.pcm
+                if (pcm != null) {
+                    playPcm(pcm)
+                    prefs.edit().putInt("lastSlot", slot).apply()
+                    lastUsedSlot = slot
+                    return null
+                }
+                errors.add("key $slot: ${r.error}")
+            } catch (e: IOException) {
+                // ইন্টারনেট সমস্যা, অন্য key-তেও একই হবে
+                return "ইন্টারনেট ত্রুটি: ${e.message}"
+            } catch (e: Exception) {
+                errors.add("key $slot: ${e.message}")
+            }
+        }
+        return errors.joinToString(" | ")
+    }
+
+    private fun request(key: String, model: String, voice: String, text: String): Result {
+        val body = JSONObject().apply {
+            put("contents", JSONArray().put(JSONObject().apply {
+                put("parts", JSONArray().put(JSONObject().put("text", text)))
+            }))
+            put("generationConfig", JSONObject().apply {
+                put("responseModalities", JSONArray().put("AUDIO"))
+                put("speechConfig", JSONObject().apply {
+                    put("voiceConfig", JSONObject().apply {
+                        put("prebuiltVoiceConfig", JSONObject().put("voiceName", voice))
                     })
                 })
-            }
+            })
+        }
 
-            val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
-            val conn = url.openConnection() as HttpURLConnection
+        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+        val conn = url.openConnection() as HttpURLConnection
+        try {
             conn.requestMethod = "POST"
-            conn.connectTimeout = 15000
-            conn.readTimeout = 60000
+            conn.connectTimeout = 10000
+            conn.readTimeout = 40000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setRequestProperty("x-goog-api-key", key)
@@ -224,25 +273,22 @@ object Speaker {
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val resp = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            conn.disconnect()
             if (code !in 200..299) {
                 val msg = try {
                     JSONObject(resp).getJSONObject("error").getString("message")
                 } catch (e: Exception) {
-                    resp.take(150)
+                    resp.take(100)
                 }
-                return "ত্রুটি $code: $msg"
+                return Result(null, "ত্রুটি $code: ${msg.take(80)}")
             }
 
             val b64 = JSONObject(resp)
                 .getJSONArray("candidates").getJSONObject(0)
                 .getJSONObject("content").getJSONArray("parts").getJSONObject(0)
                 .getJSONObject("inlineData").getString("data")
-            val pcm = Base64.decode(b64, Base64.DEFAULT)
-            playPcm(pcm)
-            null
-        } catch (e: Exception) {
-            "ত্রুটি: ${e.message}"
+            return Result(Base64.decode(b64, Base64.DEFAULT), null)
+        } finally {
+            conn.disconnect()
         }
     }
 
@@ -255,6 +301,79 @@ object Speaker {
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(SAMPLE_RATE)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .build()
+            )
+            .setBufferSizeInBytes(maxOf(minBuf, 4096))
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+        try {
+            track.play()
+            track.write(pcm, 0, pcm.size)
+            val totalFrames = pcm.size / 2
+            val deadline = System.currentTimeMillis() + (totalFrames * 1000L / SAMPLE_RATE) + 3000
+            while (track.playbackHeadPosition < totalFrames && System.currentTimeMillis() < deadline) {
+                Thread.sleep(100)
+            }
+            track.stop()
+        } finally {
+            track.release()
+        }
+    }
+}
+
+class NotifVoiceService : NotificationListenerService() {
+
+    private val executor = Executors.newSingleThreadExecutor()
+    private var tts: TextToSpeech? = null
+
+    override fun onNotificationPosted(sbn: StatusBarNotification) {
+        val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        val apps = prefs.getStringSet("apps", emptySet()) ?: emptySet()
+        if (sbn.packageName !in apps) return
+
+        val n = sbn.notification
+        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+
+        val extras = n.extras
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val body = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
+            ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString().orEmpty()
+        val message = listOf(title, body).filter { it.isNotBlank() }.joinToString("। ")
+        if (message.isBlank()) return
+
+        executor.execute {
+            val err = Speaker.speakGemini(this, message)
+            if (err != null) fallbackSpeak(message)
+        }
+    }
+
+    private fun fallbackSpeak(text: String) {
+        val engine = tts
+        if (engine != null) {
+            engine.speak(text, TextToSpeech.QUEUE_ADD, null, "nv")
+            return
+        }
+        tts = TextToSpeech(applicationContext) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.language = Locale("bn", "BD")
+                tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "nv")
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        tts?.shutdown()
+        executor.shutdown()
+        super.onDestroy()
+    }
+}utesutes.CONTENT_TYPE_SPEECH)
                     .build()
             )
             .setAudioFormat(
