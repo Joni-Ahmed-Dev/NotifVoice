@@ -5,14 +5,14 @@ import android.app.AlertDialog
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.pm.PackageManager
-import android.os.Build
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
@@ -37,7 +37,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 const val DEFAULT_KEY = ""
-const val DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"
+const val DEFAULT_MODEL = "gemini-3.8-flash-lite-tts"
 const val DEFAULT_VOICE = "Kore"
 const val DEFAULT_EL_MODEL = "eleven_v3"
 
@@ -229,7 +229,7 @@ class MainActivity : Activity() {
         root.addView(elModelBox)
         root.addView(label("Gemini API Key (একটায় ত্রুটি হলে নিজে পরেরটায় যাবে। দরকার নেই এমন ঘর ফাঁকা রাখুন)"))
         keyBoxes.forEach { root.addView(it) }
-        root.addView(label("Gemini মডেল (সাধারণত বদলাতে হয় না)"))
+        root.addView(label("Gemini মডেল (যেমন gemini-3.8-flash-lite-tts)"))
         root.addView(modelBox)
         root.addView(label("Gemini ভয়েস"))
         root.addView(voiceBox)
@@ -470,7 +470,7 @@ object Speaker {
                 val pcm = r.pcm
                 if (pcm != null) {
                     lastMs = System.currentTimeMillis() - t0
-                    playPcm(pcm)
+                    playAudio(pcm)
                     prefs.edit().putInt("lastSlot", slot).apply()
                     lastUsedSlot = slot
                     lastUsed = "Gemini key $slot"
@@ -542,6 +542,73 @@ object Speaker {
         }
     }
 
+    /** WAV হেডার থাকলে সরিয়ে শুধু অডিও অংশ বাজায়, শেষে সামান্য নীরবতা যোগ করে। */
+    private fun playAudio(raw: ByteArray) {
+        var rate = SAMPLE_RATE
+        var data = raw
+        if (raw.size > 44 &&
+            String(raw, 0, 4, Charsets.US_ASCII) == "RIFF" &&
+            String(raw, 8, 4, Charsets.US_ASCII) == "WAVE"
+        ) {
+            var pos = 12
+            while (pos + 8 <= raw.size) {
+                val id = String(raw, pos, 4, Charsets.US_ASCII)
+                val size = (raw[pos + 4].toInt() and 0xFF) or
+                    ((raw[pos + 5].toInt() and 0xFF) shl 8) or
+                    ((raw[pos + 6].toInt() and 0xFF) shl 16) or
+                    ((raw[pos + 7].toInt() and 0xFF) shl 24)
+                if (id == "fmt " && pos + 16 <= raw.size) {
+                    rate = (raw[pos + 12].toInt() and 0xFF) or
+                        ((raw[pos + 13].toInt() and 0xFF) shl 8) or
+                        ((raw[pos + 14].toInt() and 0xFF) shl 16) or
+                        ((raw[pos + 15].toInt() and 0xFF) shl 24)
+                } else if (id == "data") {
+                    val start = pos + 8
+                    val end = if (size < 0 || start + size > raw.size) raw.size else start + size
+                    data = raw.copyOfRange(start, end)
+                    break
+                }
+                pos += 8 + size + (size and 1)
+            }
+        }
+        if (rate < 8000 || rate > 48000) rate = SAMPLE_RATE
+        // জোড় সংখ্যক বাইট + শেষে ০.১ সেকেন্ড নীরবতা
+        val padded = data.copyOf((data.size / 2) * 2 + (rate / 10) * 2)
+
+        val minBuf = AudioTrack.getMinBufferSize(
+            rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+        val track = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(rate)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .build()
+            )
+            .setBufferSizeInBytes(maxOf(minBuf, 4096))
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+        try {
+            track.play()
+            track.write(padded, 0, padded.size)
+            val totalFrames = padded.size / 2
+            val deadline = System.currentTimeMillis() + (totalFrames * 1000L / rate) + 3000
+            while (track.playbackHeadPosition < totalFrames && System.currentTimeMillis() < deadline) {
+                Thread.sleep(100)
+            }
+            track.stop()
+        } finally {
+            track.release()
+        }
+    }
+
     private fun playPcm(pcm: ByteArray) {
         val minBuf = AudioTrack.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -587,6 +654,7 @@ class NotifVoiceService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
         val apps = prefs.getStringSet("apps", emptySet()) ?: emptySet()
+        // নিজের অ্যাপের পরীক্ষার নোটিফিকেশনও ধরবে
         if (sbn.packageName !in apps && sbn.packageName != packageName) return
 
         val n = sbn.notification
