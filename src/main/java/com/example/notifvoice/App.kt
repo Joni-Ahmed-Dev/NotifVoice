@@ -3,6 +3,10 @@ package com.example.notifvoice
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.pm.PackageManager
+import android.os.Build
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -204,6 +208,17 @@ class MainActivity : Activity() {
             }
         }
 
+        val testMsgBox = EditText(this).apply {
+            setText("আসসালামু আলাইকুম। আপনার একটি নতুন বার্তা এসেছে, নোটিফিকেশন ঠিকঠাক কাজ করছে।")
+        }
+        val notifTestBtn = Button(this).apply {
+            text = "৫. নোটিফিকেশন পাঠিয়ে পরীক্ষা করুন"
+            setOnClickListener {
+                saveBtn.performClick()
+                sendTestNotification(testMsgBox.text.toString())
+            }
+        }
+
         root.addView(label("কোন ভয়েস ব্যবহার হবে (ক্রম: আগেরটা না চললে পরেরটা। \"শুধু\" বেছে নিলে ব্যর্থ হলে আর কিছু পড়া হবে না)"))
         root.addView(providerBox)
         root.addView(label("ElevenLabs API Key"))
@@ -224,9 +239,40 @@ class MainActivity : Activity() {
         root.addView(pickBtn)
         root.addView(saveBtn)
         root.addView(testBtn)
+        root.addView(label("পরীক্ষার বার্তা (বাংলায় যা খুশি লিখুন)"))
+        root.addView(testMsgBox)
+        root.addView(notifTestBtn)
 
         setContentView(scroll)
         refreshSummary()
+    }
+
+    private fun sendTestNotification(text: String) {
+        if (text.isBlank()) {
+            Toast.makeText(this, "আগে বার্তা লিখুন", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+            Toast.makeText(this, "অনুমতি দিন, তারপর আবার চাপুন", Toast.LENGTH_LONG).show()
+            return
+        }
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = "nv_test"
+        nm.createNotificationChannel(
+            NotificationChannel(channelId, "পরীক্ষার নোটিফিকেশন", NotificationManager.IMPORTANCE_LOW)
+        )
+        val n = Notification.Builder(this, channelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Notif Voice পরীক্ষা")
+            .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .build()
+        nm.notify((System.currentTimeMillis() % 100000).toInt(), n)
+        Toast.makeText(this, "নোটিফিকেশন পাঠানো হয়েছে", Toast.LENGTH_SHORT).show()
     }
 
     private fun refreshSummary() {
@@ -541,7 +587,7 @@ class NotifVoiceService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
         val apps = prefs.getStringSet("apps", emptySet()) ?: emptySet()
-        if (sbn.packageName !in apps) return
+        if (sbn.packageName !in apps && sbn.packageName != packageName) return
 
         val n = sbn.notification
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
