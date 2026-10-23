@@ -177,7 +177,8 @@ class MainActivity : Activity() {
                         runOnUiThread {
                             Toast.makeText(
                                 this@MainActivity,
-                                err ?: "পরীক্ষা সফল (${Speaker.lastUsed}, ${Speaker.lastMs / 100 / 10.0} সেকেন্ড)",
+                                err ?: ("পরীক্ষা সফল (${Speaker.lastUsed}, ${Speaker.lastMs / 100 / 10.0} সেকেন্ড)" +
+                                    (if (Speaker.lastElError.isNotBlank()) "\nElevenLabs ব্যর্থ: ${Speaker.lastElError}" else "")),
                                 Toast.LENGTH_LONG
                             ).show()
                         }
@@ -269,6 +270,9 @@ object Speaker {
     @Volatile
     var lastMs = 0L
 
+    @Volatile
+    var lastElError = ""
+
     private class Result(val pcm: ByteArray?, val error: String?, val code: Int)
 
     /** সফল হলে null, ব্যর্থ হলে ত্রুটির বার্তা (তখন ফোনের ভয়েসে পড়তে হবে)। */
@@ -278,6 +282,7 @@ object Speaker {
         if (provider == "phone") return "ফোনের ভয়েস"
         if (provider == "eleven") {
             val e = speakEleven(ctx, text)
+            lastElError = e ?: ""
             if (e == null) return null
             val g = speakGemini(ctx, text)
             return if (g == null) null else "ElevenLabs: $e | Gemini: $g"
