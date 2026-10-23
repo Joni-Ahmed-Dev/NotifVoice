@@ -37,6 +37,15 @@ const val DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"
 const val DEFAULT_VOICE = "Kore"
 const val DEFAULT_EL_MODEL = "eleven_v3"
 
+// g = Gemini, e = ElevenLabs, p = ফোনের ভয়েস। ক্রম মানে আগেরটা না চললে পরেরটা।
+fun normProvider(p: String?): String = when (p) {
+    null -> "g_e_p"
+    "eleven" -> "e_g_p"
+    "gemini" -> "g_p"
+    "phone" -> "p"
+    else -> p
+}
+
 class MainActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
@@ -60,10 +69,14 @@ class MainActivity : Activity() {
             setPadding(0, pad, 0, 0)
         }
 
-        val providerValues = listOf("eleven", "gemini", "phone")
+        val providerValues = listOf("g_e_p", "e_g_p", "g_p", "e_p", "g", "e", "p")
         val providerLabels = listOf(
+            "Gemini → ElevenLabs → ফোনের ভয়েস",
             "ElevenLabs → Gemini → ফোনের ভয়েস",
             "Gemini → ফোনের ভয়েস",
+            "ElevenLabs → ফোনের ভয়েস",
+            "শুধু Gemini (ব্যর্থ হলে চুপ)",
+            "শুধু ElevenLabs (ব্যর্থ হলে চুপ)",
             "শুধু ফোনের ভয়েস (অফলাইন)"
         )
         val providerBox = Spinner(this).apply {
@@ -72,7 +85,7 @@ class MainActivity : Activity() {
                 android.R.layout.simple_spinner_dropdown_item,
                 providerLabels
             )
-            val cur = prefs.getString("provider", "gemini")
+            val cur = normProvider(prefs.getString("provider", null))
             setSelection(providerValues.indexOf(cur).coerceAtLeast(0))
         }
         val elKeyBox = EditText(this).apply {
@@ -156,9 +169,10 @@ class MainActivity : Activity() {
             setOnClickListener {
                 saveBtn.performClick()
                 val msg = "আসসালামু আলাইকুম। এটি একটি পরীক্ষামূলক বার্তা।"
-                if (providerValues[providerBox.selectedItemPosition] == "phone") {
+                val ctx = this@MainActivity
+                if (Speaker.planOf(ctx) == listOf('p')) {
                     var engine: TextToSpeech? = null
-                    engine = TextToSpeech(this@MainActivity) { st ->
+                    engine = TextToSpeech(ctx) { st ->
                         if (st == TextToSpeech.SUCCESS) {
                             engine?.setAudioAttributes(
                                 AudioAttributes.Builder()
@@ -170,24 +184,27 @@ class MainActivity : Activity() {
                             engine?.speak(msg, TextToSpeech.QUEUE_FLUSH, null, "t")
                         }
                     }
-                    Toast.makeText(this@MainActivity, "ফোনের ভয়েসে চলছে", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(ctx, "ফোনের ভয়েসে চলছে", Toast.LENGTH_SHORT).show()
                 } else {
                     Thread {
-                        val err = Speaker.speak(this@MainActivity, msg)
+                        val err = Speaker.speak(ctx, msg)
+                        val text = if (err == null) {
+                            "পরীক্ষা সফল (${Speaker.lastUsed}, ${Speaker.lastMs / 100 / 10.0} সেকেন্ড)" +
+                                (if (Speaker.lastFail.isNotBlank()) "\nআগে ব্যর্থ: ${Speaker.lastFail}" else "")
+                        } else if (Speaker.allowPhone(ctx)) {
+                            "অনলাইন ভয়েস ব্যর্থ, ফোনের ভয়েসে পড়া হবে: $err"
+                        } else {
+                            "ব্যর্থ: $err"
+                        }
                         runOnUiThread {
-                            Toast.makeText(
-                                this@MainActivity,
-                                err ?: ("পরীক্ষা সফল (${Speaker.lastUsed}, ${Speaker.lastMs / 100 / 10.0} সেকেন্ড)" +
-                                    (if (Speaker.lastElError.isNotBlank()) "\nElevenLabs ব্যর্থ: ${Speaker.lastElError}" else "")),
-                                Toast.LENGTH_LONG
-                            ).show()
+                            Toast.makeText(ctx, text, Toast.LENGTH_LONG).show()
                         }
                     }.start()
                 }
             }
         }
 
-        root.addView(label("কোন ভয়েস ব্যবহার হবে (ক্রম: আগেরটা না চললে পরেরটা)"))
+        root.addView(label("কোন ভয়েস ব্যবহার হবে (ক্রম: আগেরটা না চললে পরেরটা। \"শুধু\" বেছে নিলে ব্যর্থ হলে আর কিছু পড়া হবে না)"))
         root.addView(providerBox)
         root.addView(label("ElevenLabs API Key"))
         root.addView(elKeyBox)
@@ -271,23 +288,50 @@ object Speaker {
     var lastMs = 0L
 
     @Volatile
-    var lastElError = ""
+    var lastFail = ""
 
     private class Result(val pcm: ByteArray?, val error: String?, val code: Int)
 
-    /** সফল হলে null, ব্যর্থ হলে ত্রুটির বার্তা (তখন ফোনের ভয়েসে পড়তে হবে)। */
-    fun speak(ctx: Context, text: String): String? {
+    /** সেটিং থেকে ভয়েসের ক্রম, যেমন [g, e, p]। */
+    fun planOf(ctx: Context): List<Char> {
         val prefs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
-        val provider = prefs.getString("provider", "gemini")
-        if (provider == "phone") return "ফোনের ভয়েস"
-        if (provider == "eleven") {
-            val e = speakEleven(ctx, text)
-            lastElError = e ?: ""
-            if (e == null) return null
-            val g = speakGemini(ctx, text)
-            return if (g == null) null else "ElevenLabs: $e | Gemini: $g"
+        val norm = normProvider(prefs.getString("provider", null))
+        return norm.split("_").filter { it.isNotEmpty() }.map { it[0] }
+    }
+
+    /** ফোনের ভয়েস ব্যাকআপ হিসেবে আছে কি না। */
+    fun allowPhone(ctx: Context): Boolean = 'p' in planOf(ctx)
+
+    /** সফল হলে null। ব্যর্থ হলে ত্রুটির বার্তা (ফোনের ভয়েস থাকলে তখন সেটায় পড়তে হবে)। */
+    fun speak(ctx: Context, text: String): String? {
+        val errs = ArrayList<String>()
+        lastFail = ""
+        for (step in planOf(ctx)) {
+            when (step) {
+                'g' -> {
+                    val e = speakGemini(ctx, text)
+                    if (e == null) {
+                        lastFail = errs.joinToString(" | ")
+                        return null
+                    }
+                    errs.add("Gemini: $e")
+                }
+                'e' -> {
+                    val e = speakEleven(ctx, text)
+                    if (e == null) {
+                        lastFail = errs.joinToString(" | ")
+                        return null
+                    }
+                    errs.add("ElevenLabs: $e")
+                }
+                'p' -> {
+                    lastFail = errs.joinToString(" | ")
+                    return if (errs.isEmpty()) "ফোনের ভয়েস" else errs.joinToString(" | ")
+                }
+            }
         }
-        return speakGemini(ctx, text)
+        lastFail = errs.joinToString(" | ")
+        return errs.joinToString(" | ")
     }
 
     private fun speakEleven(ctx: Context, text: String): String? {
@@ -504,18 +548,20 @@ class NotifVoiceService : NotificationListenerService() {
 
         val extras = n.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-        val body = extractBody(extras).take(250)
+        val body = extractBody(extras).take(120)
         val message = body.ifBlank { title }
         if (message.isBlank()) return
 
         pending.incrementAndGet()
         executor.execute {
             try {
-                if (pending.get() > 1) {
+                val allowPhone = Speaker.allowPhone(this)
+                if (pending.get() > 1 && allowPhone) {
+                    // পেছনে আরও বার্তা জমে আছে: দ্রুত ফোনের ভয়েসে
                     fallbackSpeak(message)
                 } else {
                     val err = Speaker.speak(this, message)
-                    if (err != null) fallbackSpeak(message)
+                    if (err != null && allowPhone) fallbackSpeak(message)
                 }
             } finally {
                 pending.decrementAndGet()
