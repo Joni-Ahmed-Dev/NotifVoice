@@ -1,6 +1,7 @@
 package com.example.notifvoice
 
 import android.app.Activity
+import android.graphics.Color
 import android.app.Notification
 import android.content.Context
 import android.content.Intent
@@ -67,7 +68,8 @@ object InputBus {
 class MainActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
-    private lateinit var logView: TextView
+    private lateinit var logContainer: LinearLayout
+    private lateinit var logCount: TextView
     private lateinit var testMsgBox: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -217,7 +219,17 @@ class MainActivity : Activity() {
                 )
             )
         }
-        logView = TextView(this).apply { textSize = 13f }
+        logCount = TextView(this).apply { textSize = 13f }
+        logContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val clearLogBtn = Button(this).apply {
+            text = "লগ মুছুন"
+            setOnClickListener {
+                prefs.edit().remove("lastLog").apply()
+                renderLog()
+            }
+        }
 
         root.addView(label("কোন ভয়েস ব্যবহার হবে (ক্রম: আগেরটা না চললে পরেরটা। \"শুধু\" বেছে নিলে ব্যর্থ হলে আর কিছু পড়া হবে না)"))
         root.addView(providerBox)
@@ -243,8 +255,10 @@ class MainActivity : Activity() {
         root.addView(testBtn)
         root.addView(label("ইনপুট বক্স: নোটিফিকেশনের লেখা এখানে এসে বসে, সেখান থেকেই পড়া হয়। চাইলে নিজেও লিখে পরীক্ষা করতে পারেন"))
         root.addView(testMsgBox)
-        root.addView(label("শেষ ৬টা নোটিফিকেশনের হিসাব (নতুনটা উপরে। অ্যাপে ফিরে এলে নতুন হয়)"))
-        root.addView(logView)
+        root.addView(label("শেষ নোটিফিকেশনের হিসাব (নতুনটা উপরে, অ্যাপে ফিরে এলে নতুন হয়)"))
+        root.addView(logCount)
+        root.addView(logContainer)
+        root.addView(clearLogBtn)
 
         setContentView(scroll)
     }
@@ -258,9 +272,36 @@ class MainActivity : Activity() {
         super.onResume()
         prefs.getString("inbox", null)?.let { testMsgBox.setText(it) }
         InputBus.listener = { t -> runOnUiThread { testMsgBox.setText(t) } }
-        logView.text = prefs.getString("lastLog", "")
-            .orEmpty()
-            .ifBlank { "এখনো কোনো নোটিফিকেশন পড়া হয়নি" }
+        renderLog()
+    }
+
+    private fun renderLog() {
+        val items = prefs.getString("lastLog", "").orEmpty()
+            .split(LOG_SEP)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        logCount.text = if (items.isEmpty()) {
+            "এখনো কোনো নোটিফিকেশন পড়া হয়নি"
+        } else {
+            "মোট ${items.size}টা নোটিফিকেশন"
+        }
+        logContainer.removeAllViews()
+        if (items.isEmpty()) return
+        val pad = (10 * resources.displayMetrics.density).toInt()
+        for (entry in items) {
+            val v = TextView(this).apply {
+                text = entry
+                textSize = 13f
+                setPadding(pad, pad, pad, pad)
+                setBackgroundColor(Color.parseColor("#F1F1F1"))
+            }
+            logContainer.addView(v)
+            val spacer = TextView(this).apply {
+                textSize = 4f
+                text = ""
+            }
+            logContainer.addView(spacer)
+        }
     }
 
     private fun phoneSpeak(msg: String) {
@@ -742,7 +783,7 @@ class NotifVoiceService : NotificationListenerService() {
                     "Target: $TARGET_PACKAGE\n" +
                     "বার্তা: ${message.take(100)}\n" +
                     "ফলাফল: ${result.source}\n" +
-                    "সময়: ${result.ms} ms"
+                    "সময়: ${secText(result.ms)}"
                 )
             } else if (Speaker.allowPhone(this)) {
                 speakPhone(message)
@@ -823,6 +864,10 @@ class NotifVoiceService : NotificationListenerService() {
         return candidates.maxByOrNull { it.length }.orEmpty()
     }
 
+    private fun secText(ms: Long): String {
+        return String.format(Locale.US, "%.1f সেকেন্ড", ms / 1000.0)
+    }
+
     private fun saveLog(entry: String) {
         val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
         val old = prefs.getString("lastLog", "").orEmpty()
@@ -832,7 +877,7 @@ class NotifVoiceService : NotificationListenerService() {
             old.split(LOG_SEP)
         }
         val updated = (listOf(
-            "${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())}  $entry"
+            "${SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())}  $entry"
         ) + logs).take(6)
         prefs.edit().putString("lastLog", updated.joinToString(LOG_SEP)).apply()
     }
