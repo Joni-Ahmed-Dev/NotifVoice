@@ -10,7 +10,9 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
 import android.os.Bundle
@@ -18,6 +20,7 @@ import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -32,14 +35,21 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 const val DEFAULT_KEY = ""
 const val DEFAULT_MODEL = "gemini-3.8-flash-lite-tts"
 const val DEFAULT_VOICE = "Kore"
 const val DEFAULT_EL_MODEL = "eleven_v3"
+const val LOG_SEP = "\n--------\n"
 
 // g = Gemini, e = ElevenLabs, p = ফোনের ভয়েস। ক্রম মানে আগেরটা না চললে পরেরটা।
 fun normProvider(p: String?): String = when (p) {
@@ -54,6 +64,7 @@ class MainActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
     private lateinit var appsSummary: TextView
+    private lateinit var logView: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -92,6 +103,23 @@ class MainActivity : Activity() {
             val cur = normProvider(prefs.getString("provider", null))
             setSelection(providerValues.indexOf(cur).coerceAtLeast(0))
         }
+
+        val outValues = listOf("media", "notif", "notif_bt")
+        val outLabels = listOf(
+            "মিডিয়া ভলিউম (ব্লুটুথ থাকলে শুধু ব্লুটুথে বাজে)",
+            "নোটিফিকেশন ভলিউম (ফোন ও ব্লুটুথ দুটোতেই বাজতে পারে)",
+            "নোটিফিকেশন ভলিউম, ব্লুটুথ থাকলে শুধু ব্লুটুথে (পরীক্ষামূলক)"
+        )
+        val outBox = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                outLabels
+            )
+            val cur = prefs.getString("outMode", "media")
+            setSelection(outValues.indexOf(cur).coerceAtLeast(0))
+        }
+
         val elKeyBox = EditText(this).apply {
             hint = "ElevenLabs API Key"
             setSingleLine()
@@ -153,6 +181,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val ed = prefs.edit()
                 ed.putString("provider", providerValues[providerBox.selectedItemPosition])
+                ed.putString("outMode", outValues[outBox.selectedItemPosition])
                 ed.putString("elKey", elKeyBox.text.toString().trim())
                 ed.putString("elVoice", elVoiceBox.text.toString().trim())
                 ed.putString("elModel", elModelBox.text.toString().trim())
@@ -175,39 +204,30 @@ class MainActivity : Activity() {
                 val msg = "আসসালামু আলাইকুম। এটি একটি পরীক্ষামূলক বার্তা।"
                 val ctx = this@MainActivity
                 if (Speaker.planOf(ctx) == listOf('p')) {
-                    var engine: TextToSpeech? = null
-                    engine = TextToSpeech(ctx) { st ->
-                        if (st == TextToSpeech.SUCCESS) {
-                            engine?.setAudioAttributes(
-                                AudioAttributes.Builder()
-                                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                    .build()
-                            )
-                            engine?.language = Locale("bn", "BD")
-                            engine?.speak(msg, TextToSpeech.QUEUE_FLUSH, null, "t")
-                        }
-                    }
+                    phoneSpeak(msg)
                     Toast.makeText(ctx, "ফোনের ভয়েসে চলছে", Toast.LENGTH_SHORT).show()
                 } else {
                     Thread {
-                        val err = Speaker.speak(ctx, msg)
-                        val text = if (err == null) {
-                            "পরীক্ষা সফল (${Speaker.lastUsed}, ${Speaker.lastMs / 100 / 10.0} সেকেন্ড)" +
-                                (if (Speaker.lastFail.isNotBlank()) "\nআগে ব্যর্থ: ${Speaker.lastFail}" else "")
-                        } else if (Speaker.allowPhone(ctx)) {
-                            "অনলাইন ভয়েস ব্যর্থ, ফোনের ভয়েসে পড়া হবে: $err"
+                        val f = Speaker.fetch(ctx, msg)
+                        val pcm = f.pcm
+                        val phone = Speaker.allowPhone(ctx)
+                        val text = if (pcm != null) {
+                            "পরীক্ষা সফল (${f.source}, ${f.ms / 100 / 10.0} সেকেন্ড)" +
+                                (if (f.fail.isNotBlank()) "\nআগে ব্যর্থ: ${f.fail}" else "")
+                        } else if (phone) {
+                            "অনলাইন ভয়েস ব্যর্থ, ফোনের ভয়েসে পড়া হচ্ছে: ${f.error}"
                         } else {
-                            "ব্যর্থ: $err"
+                            "ব্যর্থ: ${f.error}"
                         }
                         runOnUiThread {
                             Toast.makeText(ctx, text, Toast.LENGTH_LONG).show()
+                            if (pcm == null && phone) phoneSpeak(msg)
                         }
+                        if (pcm != null) Speaker.play(ctx, pcm, f.rate)
                     }.start()
                 }
             }
         }
-
         val testMsgBox = EditText(this).apply {
             setText("আসসালামু আলাইকুম। আপনার একটি নতুন বার্তা এসেছে, নোটিফিকেশন ঠিকঠাক কাজ করছে।")
         }
@@ -218,9 +238,12 @@ class MainActivity : Activity() {
                 sendTestNotification(testMsgBox.text.toString())
             }
         }
+        logView = TextView(this).apply { textSize = 13f }
 
         root.addView(label("কোন ভয়েস ব্যবহার হবে (ক্রম: আগেরটা না চললে পরেরটা। \"শুধু\" বেছে নিলে ব্যর্থ হলে আর কিছু পড়া হবে না)"))
         root.addView(providerBox)
+        root.addView(label("ভয়েস কোথায় ও কোন ভলিউমে বাজবে"))
+        root.addView(outBox)
         root.addView(label("ElevenLabs API Key"))
         root.addView(elKeyBox)
         root.addView(label("ElevenLabs Voice ID (ElevenLabs-এর Voices পাতা থেকে কপি করুন)"))
@@ -242,9 +265,29 @@ class MainActivity : Activity() {
         root.addView(label("পরীক্ষার বার্তা (বাংলায় যা খুশি লিখুন)"))
         root.addView(testMsgBox)
         root.addView(notifTestBtn)
+        root.addView(label("শেষ ৬টা নোটিফিকেশনের হিসাব (নতুনটা উপরে। অ্যাপে ফিরে এলে নতুন হয়)"))
+        root.addView(logView)
 
         setContentView(scroll)
         refreshSummary()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        logView.text = prefs.getString("lastLog", "")
+            .orEmpty()
+            .ifBlank { "এখনো কোনো নোটিফিকেশন পড়া হয়নি" }
+    }
+
+    private fun phoneSpeak(msg: String) {
+        var engine: TextToSpeech? = null
+        engine = TextToSpeech(this) { st ->
+            if (st == TextToSpeech.SUCCESS) {
+                engine?.setAudioAttributes(Speaker.outAttrs(this))
+                engine?.language = Locale("bn", "BD")
+                engine?.speak(msg, TextToSpeech.QUEUE_FLUSH, null, "t")
+            }
+        }
     }
 
     private fun sendTestNotification(text: String) {
@@ -324,19 +367,19 @@ object Speaker {
     private const val BUDGET_MS = 15000L
     const val SLOTS = 5
 
-    @Volatile
-    var lastUsedSlot = 0
+    /** fetch-এর ফল। error == null মানে সফল (pcm আছে)। */
+    class Fetched(
+        val pcm: ByteArray?,
+        val rate: Int,
+        val source: String,
+        val ms: Long,
+        val fail: String,
+        val error: String?
+    )
 
-    @Volatile
-    var lastUsed = ""
+    private class Got(val pcm: ByteArray?, val rate: Int, val source: String, val error: String?)
 
-    @Volatile
-    var lastMs = 0L
-
-    @Volatile
-    var lastFail = ""
-
-    private class Result(val pcm: ByteArray?, val error: String?, val code: Int)
+    private class Result(val pcm: ByteArray?, val error: String?, val code: Int, val restMs: Long)
 
     /** সেটিং থেকে ভয়েসের ক্রম, যেমন [g, e, p]। */
     fun planOf(ctx: Context): List<Char> {
@@ -348,48 +391,105 @@ object Speaker {
     /** ফোনের ভয়েস ব্যাকআপ হিসেবে আছে কি না। */
     fun allowPhone(ctx: Context): Boolean = 'p' in planOf(ctx)
 
-    /** সফল হলে null। ব্যর্থ হলে ত্রুটির বার্তা (ফোনের ভয়েস থাকলে তখন সেটায় পড়তে হবে)। */
-    fun speak(ctx: Context, text: String): String? {
+    /** আউটপুট মোড অনুযায়ী অডিওর ধরন। media = মিডিয়া ভলিউম (ব্লুটুথ থাকলে শুধু ব্লুটুথ)। */
+    fun outAttrs(ctx: Context): AudioAttributes {
+        val mode = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+            .getString("outMode", "media")
+        val usage = if (mode == "media") AudioAttributes.USAGE_MEDIA
+        else AudioAttributes.USAGE_NOTIFICATION
+        return AudioAttributes.Builder()
+            .setUsage(usage)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+    }
+
+    /** notif_bt মোডে ব্লুটুথ আউটপুট থাকলে সেটা, নইলে null। */
+    private fun btDevice(ctx: Context): AudioDeviceInfo? {
+        val mode = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+            .getString("outMode", "media")
+        if (mode != "notif_bt") return null
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull {
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                (Build.VERSION.SDK_INT >= 31 &&
+                    (it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                        it.type == AudioDeviceInfo.TYPE_BLE_SPEAKER))
+        }
+    }
+
+    /**
+     * শুধু অডিও আনে, বাজায় না। ব্যাকগ্রাউন্ড থ্রেডে চালাতে হবে।
+     * একাধিক নোটিফিকেশনের অডিও একসাথে আনা যায়, বাজানো আলাদা ধাপে (play)।
+     */
+    fun fetch(ctx: Context, text: String): Fetched {
+        val t0 = System.currentTimeMillis()
         val errs = ArrayList<String>()
-        lastFail = ""
         for (step in planOf(ctx)) {
             when (step) {
                 'g' -> {
-                    val e = speakGemini(ctx, text)
-                    if (e == null) {
-                        lastFail = errs.joinToString(" | ")
-                        return null
+                    val g = fetchGemini(ctx, text)
+                    val pcm = g.pcm
+                    if (pcm != null) {
+                        return Fetched(
+                            pcm, g.rate, g.source,
+                            System.currentTimeMillis() - t0, errs.joinToString(" | "), null
+                        )
                     }
-                    errs.add("Gemini: $e")
+                    errs.add("Gemini: ${g.error}")
                 }
                 'e' -> {
-                    val e = speakEleven(ctx, text)
-                    if (e == null) {
-                        lastFail = errs.joinToString(" | ")
-                        return null
+                    val g = fetchEleven(ctx, text)
+                    val pcm = g.pcm
+                    if (pcm != null) {
+                        return Fetched(
+                            pcm, g.rate, g.source,
+                            System.currentTimeMillis() - t0, errs.joinToString(" | "), null
+                        )
                     }
-                    errs.add("ElevenLabs: $e")
+                    errs.add("ElevenLabs: ${g.error}")
                 }
                 'p' -> {
-                    lastFail = errs.joinToString(" | ")
-                    return if (errs.isEmpty()) "ফোনের ভয়েস" else errs.joinToString(" | ")
+                    val all = errs.joinToString(" | ")
+                    return Fetched(
+                        null, 0, "", System.currentTimeMillis() - t0, all,
+                        if (errs.isEmpty()) "ফোনের ভয়েস" else all
+                    )
                 }
             }
         }
-        lastFail = errs.joinToString(" | ")
-        return errs.joinToString(" | ")
+        val all = errs.joinToString(" | ")
+        return Fetched(
+            null, 0, "", System.currentTimeMillis() - t0, all,
+            all.ifEmpty { "কোনো ভয়েস বাছা নেই" }
+        )
     }
 
-    private fun speakEleven(ctx: Context, text: String): String? {
-        val t0 = System.currentTimeMillis()
+    private fun restFor(code: Int, resp: String): Long = when (code) {
+        429 -> {
+            if (resp.contains("PerDay", ignoreCase = true)) {
+                30 * 60 * 1000L
+            } else {
+                // মিনিটের সীমা: Google যত সেকেন্ড বলে ততই বিশ্রাম, না বললে ১ মিনিট
+                val m = Regex("\"retryDelay\"\\s*:\\s*\"(\\d+)").find(resp)
+                val s = m?.groupValues?.get(1)?.toLongOrNull() ?: 60L
+                (minOf(s, 600L) + 1L) * 1000L
+            }
+        }
+        401, 403 -> 30 * 60 * 1000L
+        else -> 0L
+    }
+
+    private fun fetchEleven(ctx: Context, text: String): Got {
         val prefs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
         val key = prefs.getString("elKey", "").orEmpty().trim()
         val voice = prefs.getString("elVoice", "").orEmpty().trim()
         val model = prefs.getString("elModel", DEFAULT_EL_MODEL).orEmpty().trim()
             .ifEmpty { DEFAULT_EL_MODEL }
-        if (key.isEmpty()) return "ElevenLabs key দেওয়া হয়নি"
-        if (voice.isEmpty()) return "Voice ID দেওয়া হয়নি"
-        if (prefs.getLong("coolEL", 0L) > t0) return "কিছুক্ষণের জন্য বন্ধ"
+        if (key.isEmpty()) return Got(null, 0, "", "ElevenLabs key দেওয়া হয়নি")
+        if (voice.isEmpty()) return Got(null, 0, "", "Voice ID দেওয়া হয়নি")
+        if (prefs.getLong("coolEL", 0L) > System.currentTimeMillis()) {
+            return Got(null, 0, "", "কিছুক্ষণের জন্য বন্ধ")
+        }
 
         var conn: HttpURLConnection? = null
         return try {
@@ -418,26 +518,24 @@ object Speaker {
                     resp.take(100)
                 }
                 if (code == 401 || code == 402 || code == 429) {
-                    prefs.edit().putLong("coolEL", System.currentTimeMillis() + 5 * 60 * 1000L).apply()
+                    // ৪২৯ মানে একসাথে অনেক অনুরোধ, অল্প বিশ্রামই যথেষ্ট
+                    val rest = if (code == 429) 20 * 1000L else 5 * 60 * 1000L
+                    prefs.edit().putLong("coolEL", System.currentTimeMillis() + rest).apply()
                 }
-                return "ত্রুটি $code: ${msg.take(80)}"
+                return Got(null, 0, "", "ত্রুটি $code: ${msg.take(80)}")
             }
             val pcm = c.inputStream.readBytes()
-            lastMs = System.currentTimeMillis() - t0
-            playPcm(pcm)
-            lastUsed = "ElevenLabs"
-            null
+            Got(pcm, SAMPLE_RATE, "ElevenLabs", null)
         } catch (e: IOException) {
-            "ইন্টারনেট ত্রুটি: ${e.message}"
+            Got(null, 0, "", "ইন্টারনেট ত্রুটি: ${e.message}")
         } catch (e: Exception) {
-            "ত্রুটি: ${e.message}"
+            Got(null, 0, "", "ত্রুটি: ${e.message}")
         } finally {
             conn?.disconnect()
         }
     }
 
-    /** সফল হলে null, ব্যর্থ হলে ত্রুটির বার্তা। ব্যাকগ্রাউন্ড থ্রেডে চালাতে হবে। */
-    fun speakGemini(ctx: Context, text: String): String? {
+    private fun fetchGemini(ctx: Context, text: String): Got {
         val t0 = System.currentTimeMillis()
         val prefs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
         val model = prefs.getString("model", DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
@@ -450,48 +548,48 @@ object Speaker {
             ).orEmpty().trim()
             if (k.isEmpty()) null else i to k
         }
-        if (all.isEmpty()) return "API key দেওয়া হয়নি"
+        if (all.isEmpty()) return Got(null, 0, "", "API key দেওয়া হয়নি")
 
         val slots = all.filter { prefs.getLong("cool${it.first}", 0L) <= t0 }
-        if (slots.isEmpty()) return "সব key কিছুক্ষণের জন্য বন্ধ (কোটা শেষ)"
+        if (slots.isEmpty()) return Got(null, 0, "", "সব key কিছুক্ষণের জন্য বন্ধ (কোটা শেষ)")
 
         val start = prefs.getInt("lastSlot", 1)
         val ordered = slots.sortedBy { (it.first - start + SLOTS) % SLOTS }
 
         val errors = ArrayList<String>()
-        for ((slot, key) in ordered) {
-            val remaining = BUDGET_MS - (System.currentTimeMillis() - t0)
-            if (remaining < 3000) {
-                errors.add("সময় শেষ")
-                break
-            }
-            try {
-                val r = request(key, model, voice, text, minOf(remaining, 20000L).toInt())
-                val pcm = r.pcm
-                if (pcm != null) {
-                    lastMs = System.currentTimeMillis() - t0
-                    playAudio(pcm)
+        outer@ for ((slot, key) in ordered) {
+            var attempt = 0
+            while (attempt < 2) {
+                attempt++
+                val remaining = BUDGET_MS - (System.currentTimeMillis() - t0)
+                if (remaining < 3000) {
+                    errors.add("সময় শেষ")
+                    break@outer
+                }
+                val r: Result = try {
+                    request(key, model, voice, text, minOf(remaining, 20000L).toInt())
+                } catch (e: IOException) {
+                    return Got(null, 0, "", "ইন্টারনেট ত্রুটি: ${e.message}")
+                } catch (e: Exception) {
+                    Result(null, "ত্রুটি: ${e.message}", 0, 0L)
+                }
+                val raw = r.pcm
+                if (raw != null) {
+                    val (data, rate) = decodeAudio(raw)
                     prefs.edit().putInt("lastSlot", slot).apply()
-                    lastUsedSlot = slot
-                    lastUsed = "Gemini key $slot"
-                    return null
+                    return Got(data, rate, "Gemini key $slot", null)
                 }
                 errors.add("key $slot: ${r.error}")
-                val rest = when (r.code) {
-                    429 -> 5 * 60 * 1000L
-                    401, 403 -> 30 * 60 * 1000L
-                    else -> 0L
+                if (r.restMs > 0) {
+                    prefs.edit().putLong("cool$slot", System.currentTimeMillis() + r.restMs).apply()
+                    continue@outer
                 }
-                if (rest > 0) {
-                    prefs.edit().putLong("cool$slot", System.currentTimeMillis() + rest).apply()
-                }
-            } catch (e: IOException) {
-                return "ইন্টারনেট ত্রুটি: ${e.message}"
-            } catch (e: Exception) {
-                errors.add("key $slot: ${e.message}")
+                // সার্ভারের সাময়িক ত্রুটি বা অডিও না আসা: একই key-তে আরেকবার চেষ্টা
+                val retryable = r.code == 0 || r.code == 500 || r.code == 503
+                if (!retryable) continue@outer
             }
         }
-        return errors.joinToString(" | ")
+        return Got(null, 0, "", errors.joinToString(" | "))
     }
 
     private fun request(key: String, model: String, voice: String, text: String, readMs: Int): Result {
@@ -529,21 +627,35 @@ object Speaker {
                 } catch (e: Exception) {
                     resp.take(100)
                 }
-                return Result(null, "ত্রুটি $code: ${msg.take(80)}", code)
+                return Result(null, "ত্রুটি $code: ${msg.take(80)}", code, restFor(code, resp))
             }
 
-            val b64 = JSONObject(resp)
-                .getJSONArray("candidates").getJSONObject(0)
-                .getJSONObject("content").getJSONArray("parts").getJSONObject(0)
-                .getJSONObject("inlineData").getString("data")
-            return Result(Base64.decode(b64, Base64.DEFAULT), null, code)
+            val root = JSONObject(resp)
+            val cand = root.optJSONArray("candidates")?.optJSONObject(0)
+            val parts = cand?.optJSONObject("content")?.optJSONArray("parts")
+            var b64: String? = null
+            if (parts != null) {
+                for (i in 0 until parts.length()) {
+                    val d = parts.optJSONObject(i)?.optJSONObject("inlineData")?.optString("data")
+                    if (!d.isNullOrEmpty()) {
+                        b64 = d
+                        break
+                    }
+                }
+            }
+            if (b64 == null) {
+                val reason = cand?.optString("finishReason").orEmpty()
+                val block = root.optJSONObject("promptFeedback")?.optString("blockReason").orEmpty()
+                return Result(null, "অডিও আসেনি ($reason $block)".trim(), 0, 0L)
+            }
+            return Result(Base64.decode(b64, Base64.DEFAULT), null, code, 0L)
         } finally {
             conn.disconnect()
         }
     }
 
-    /** WAV হেডার থাকলে সরিয়ে শুধু অডিও অংশ বাজায়, শেষে সামান্য নীরবতা যোগ করে। */
-    private fun playAudio(raw: ByteArray) {
+    /** WAV হেডার থাকলে সরিয়ে শুধু অডিও অংশ আর স্যাম্পল রেট দেয়। */
+    private fun decodeAudio(raw: ByteArray): Pair<ByteArray, Int> {
         var rate = SAMPLE_RATE
         var data = raw
         if (raw.size > 44 &&
@@ -572,19 +684,17 @@ object Speaker {
             }
         }
         if (rate < 8000 || rate > 48000) rate = SAMPLE_RATE
-        // জোড় সংখ্যক বাইট + শেষে ০.১ সেকেন্ড নীরবতা
-        val padded = data.copyOf((data.size / 2) * 2 + (rate / 10) * 2)
+        return Pair(data, rate)
+    }
 
+    /** কাঁচা ১৬-বিট মোনো অডিও বাজায় (শেষ না হওয়া পর্যন্ত অপেক্ষা করে)। শেষে ০.১ সেকেন্ড নীরবতা যোগ করে। */
+    fun play(ctx: Context, data: ByteArray, rate: Int) {
+        val padded = data.copyOf((data.size / 2) * 2 + (rate / 10) * 2)
         val minBuf = AudioTrack.getMinBufferSize(
             rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
         )
         val track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
+            .setAudioAttributes(outAttrs(ctx))
             .setAudioFormat(
                 AudioFormat.Builder()
                     .setSampleRate(rate)
@@ -595,6 +705,8 @@ object Speaker {
             .setBufferSizeInBytes(maxOf(minBuf, 4096))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
+        val dev = btDevice(ctx)
+        if (dev != null) track.setPreferredDevice(dev)
         try {
             track.play()
             track.write(padded, 0, padded.size)
@@ -608,48 +720,23 @@ object Speaker {
             track.release()
         }
     }
-
-    private fun playPcm(pcm: ByteArray) {
-        val minBuf = AudioTrack.getMinBufferSize(
-            SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
-        )
-        val track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(SAMPLE_RATE)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .build()
-            )
-            .setBufferSizeInBytes(maxOf(minBuf, 4096))
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        try {
-            track.play()
-            track.write(pcm, 0, pcm.size)
-            val totalFrames = pcm.size / 2
-            val deadline = System.currentTimeMillis() + (totalFrames * 1000L / SAMPLE_RATE) + 3000
-            while (track.playbackHeadPosition < totalFrames && System.currentTimeMillis() < deadline) {
-                Thread.sleep(100)
-            }
-            track.stop()
-        } finally {
-            track.release()
-        }
-    }
 }
 
 class NotifVoiceService : NotificationListenerService() {
 
-    private val executor = Executors.newSingleThreadExecutor()
-    private val pending = AtomicInteger(0)
+    // অডিও আনা একসাথে (২টা পর্যন্ত), বাজানো এক এক করে নোটিফিকেশনের ক্রমে
+    private val fetchPool = Executors.newFixedThreadPool(2)
+    private val playPool = Executors.newSingleThreadExecutor()
+
+    @Volatile
     private var tts: TextToSpeech? = null
+
+    @Volatile
+    private var ttsDone: CountDownLatch? = null
+
+    private val dedupeLock = Any()
+    private var lastText = ""
+    private var lastTime = 0L
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
@@ -666,21 +753,63 @@ class NotifVoiceService : NotificationListenerService() {
         val message = body.ifBlank { title }
         if (message.isBlank()) return
 
-        pending.incrementAndGet()
-        executor.execute {
-            try {
-                val allowPhone = Speaker.allowPhone(this)
-                if (pending.get() > 1 && allowPhone) {
-                    // পেছনে আরও বার্তা জমে আছে: দ্রুত ফোনের ভয়েসে
-                    fallbackSpeak(message)
-                } else {
-                    val err = Speaker.speak(this, message)
-                    if (err != null && allowPhone) fallbackSpeak(message)
-                }
-            } finally {
-                pending.decrementAndGet()
-            }
+        // একই লেখা ১০ সেকেন্ডের মধ্যে আবার এলে বাদ
+        val nowT = System.currentTimeMillis()
+        synchronized(dedupeLock) {
+            if (message == lastText && nowT - lastTime < 10000) return
+            lastText = message
+            lastTime = nowT
         }
+
+        val pkg = sbn.packageName
+        val phoneOnly = Speaker.planOf(this) == listOf('p')
+        val fut: Future<Speaker.Fetched>? = if (phoneOnly) {
+            null
+        } else {
+            fetchPool.submit(Callable<Speaker.Fetched> { Speaker.fetch(this, message) })
+        }
+
+        playPool.execute {
+            var result: String
+            try {
+                if (fut == null) {
+                    speakPhone(message)
+                    result = "ফোনের ভয়েস (বাছাই অনুযায়ী)"
+                } else {
+                    val f = try {
+                        fut.get()
+                    } catch (e: Exception) {
+                        Speaker.Fetched(null, 0, "", 0L, "", "ত্রুটি: ${e.message}")
+                    }
+                    val pcm = f.pcm
+                    val waited = System.currentTimeMillis() - nowT
+                    if (pcm != null) {
+                        Speaker.play(this, pcm, f.rate)
+                        result = "সফল: ${f.source}, আনতে ${f.ms} ms, বাজার আগে মোট ${waited} ms" +
+                            (if (f.fail.isNotBlank()) "\nআগে ব্যর্থ: ${f.fail}" else "")
+                    } else if (Speaker.allowPhone(this)) {
+                        speakPhone(message)
+                        result = "ব্যর্থ: ${f.error} → ফোনের ভয়েস"
+                    } else {
+                        result = "ব্যর্থ: ${f.error}"
+                    }
+                }
+            } catch (e: Exception) {
+                result = "ত্রুটি: ${e.message}"
+            }
+            val time = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+            saveLog(
+                "$time  অ্যাপ: $pkg\nবার্তা (${message.length} অক্ষর): ${message.take(40)}\nফলাফল: $result"
+            )
+        }
+    }
+
+    private fun saveLog(entry: String) {
+        val p = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        val old = p.getString("lastLog", "").orEmpty()
+        val items = if (old.isBlank()) emptyList() else old.split(LOG_SEP)
+        val all = (listOf(entry) + items).take(6)
+        p.edit().putString("lastLog", all.joinToString(LOG_SEP)).apply()
     }
 
     private fun extractBody(extras: android.os.Bundle): String {
@@ -700,29 +829,55 @@ class NotifVoiceService : NotificationListenerService() {
         return c.filter { it.isNotBlank() }.maxByOrNull { it.length } ?: ""
     }
 
-    private fun fallbackSpeak(text: String) {
-        val engine = tts
-        if (engine != null) {
-            engine.speak(text, TextToSpeech.QUEUE_ADD, null, "nv")
-            return
+    /** ফোনের ভয়েস তৈরি (একবারই)। ব্যাকগ্রাউন্ড থ্রেডে চালাতে হবে। */
+    private fun ensureTts(): TextToSpeech? {
+        tts?.let { return it }
+        val latch = CountDownLatch(1)
+        val ok = AtomicBoolean(false)
+        val engine = TextToSpeech(applicationContext) { st ->
+            ok.set(st == TextToSpeech.SUCCESS)
+            latch.countDown()
         }
-        tts = TextToSpeech(applicationContext) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                tts?.language = Locale("bn", "BD")
-                tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "nv")
+        latch.await(5, TimeUnit.SECONDS)
+        if (!ok.get()) {
+            engine.shutdown()
+            return null
+        }
+        engine.language = Locale("bn", "BD")
+        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                ttsDone?.countDown()
             }
-        }
+
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                ttsDone?.countDown()
+            }
+
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                ttsDone?.countDown()
+            }
+        })
+        tts = engine
+        return engine
+    }
+
+    /** ফোনের ভয়েসে পড়ে, শেষ হওয়া পর্যন্ত অপেক্ষা করে (যাতে পরের অডিওর সাথে মিশে না যায়)। */
+    private fun speakPhone(text: String) {
+        val engine = ensureTts() ?: return
+        engine.setAudioAttributes(Speaker.outAttrs(this))
+        val latch = CountDownLatch(1)
+        ttsDone = latch
+        val r = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "nv")
+        if (r != TextToSpeech.SUCCESS) return
+        latch.await(30, TimeUnit.SECONDS)
     }
 
     override fun onDestroy() {
         tts?.shutdown()
-        executor.shutdown()
+        fetchPool.shutdownNow()
+        playPool.shutdownNow()
         super.onDestroy()
     }
 }
