@@ -184,7 +184,8 @@ class MainActivity : Activity() {
             text = "৩. ভয়েস পরীক্ষা করুন"
             setOnClickListener {
                 saveBtn.performClick()
-                val msg = "আসসালামু আলাইকুম। এটি একটি পরীক্ষামূলক বার্তা।"
+                val msg = testMsgBox.text.toString().trim()
+                    .ifBlank { "আসসালামু আলাইকুম। এটি একটি পরীক্ষামূলক বার্তা।" }
                 val ctx = this@MainActivity
                 if (Speaker.planOf(ctx) == listOf('p')) {
                     phoneSpeak(msg)
@@ -738,7 +739,7 @@ class NotifVoiceService : NotificationListenerService() {
         // একই notification অল্প সময়ের মধ্যে পুনরায় এলে বাদ
         if (isDuplicate(message)) return
 
-        // Inbox-এ রাখা
+        // ধাপ ১: নোটিফিকেশনের লেখা নিচের ইনপুট বক্সে রাখা
         saveInbox(message)
 
         // অ্যাপ খোলা থাকলে UI-তে পাঠানো
@@ -757,7 +758,8 @@ class NotifVoiceService : NotificationListenerService() {
             return
         }
 
-        // ভয়েস পরীক্ষা বাটনের মতোই: একই থ্রেডে fetch, তারপর play, কোনো আলাদা fetch queue না
+        // ধাপ ২: ইনপুট বক্সে রাখা লেখা দিয়ে ৩. ভয়েস পরীক্ষা করুন বাটনের লজিক চালানো
+        // (অ্যাপ বন্ধ থাকলেও একই লজিক সার্ভিস থেকে চলে, বাটনে হাত দিয়ে চাপতে হয় না)
         playPool.execute {
             // টেস্ট বাটনের মতো key 1 থেকে শুরু, যাতে একই key ক্রমে চেষ্টা হয়
             getSharedPreferences("cfg", Context.MODE_PRIVATE).edit().putInt("lastSlot", 1).apply()
