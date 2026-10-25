@@ -524,14 +524,14 @@ object Speaker {
                 }
                 return Got(null, 0, "", "ত্রুটি $code: ${msg.take(80)}")
             }
-            val pcm = c.inputStream.readBytes()
+            val pcm = c.inputStream.use { it.readBytes() }
             Got(pcm, SAMPLE_RATE, "ElevenLabs", null)
         } catch (e: IOException) {
+            conn?.disconnect()
             Got(null, 0, "", "ইন্টারনেট ত্রুটি: ${e.message}")
         } catch (e: Exception) {
-            Got(null, 0, "", "ত্রুটি: ${e.message}")
-        } finally {
             conn?.disconnect()
+            Got(null, 0, "", "ত্রুটি: ${e.message}")
         }
     }
 
@@ -649,8 +649,10 @@ object Speaker {
                 return Result(null, "অডিও আসেনি ($reason $block)".trim(), 0, 0L)
             }
             return Result(Base64.decode(b64, Base64.DEFAULT), null, code, 0L)
-        } finally {
+        } catch (e: Exception) {
+            // সফল হলে disconnect করা হয় না, যাতে সংযোগ আবার কাজে লাগে (দ্রুত হয়)
             conn.disconnect()
+            throw e
         }
     }
 
@@ -726,7 +728,7 @@ object Speaker {
 class NotifVoiceService : NotificationListenerService() {
 
     // অডিও আনা একসাথে (২টা পর্যন্ত), বাজানো এক এক করে নোটিফিকেশনের ক্রমে
-    private val fetchPool = Executors.newFixedThreadPool(2)
+    private val fetchPool = Executors.newFixedThreadPool(3)
     private val playPool = Executors.newSingleThreadExecutor()
 
     @Volatile
@@ -775,43 +777,54 @@ class NotifVoiceService : NotificationListenerService() {
 
         val pkg = sbn.packageName
         val phoneOnly = Speaker.planOf(this) == listOf('p')
-        val fut: Future<Speaker.Fetched>? = if (phoneOnly) {
+        val chunks = listOf(message)
+        // একটা নোটিফিকেশন = একটা অনুরোধ (কোটা বাঁচাতে ভাগ করা হয় না)
+        val futs: List<Future<Speaker.Fetched>>? = if (phoneOnly) {
             null
         } else {
-            fetchPool.submit(Callable<Speaker.Fetched> { Speaker.fetch(this, message) })
+            chunks.map { c ->
+                fetchPool.submit(Callable<Speaker.Fetched> { Speaker.fetch(this, c) })
+            }
         }
 
         playPool.execute {
-            var result: String
+            val parts = ArrayList<String>()
             try {
-                if (fut == null) {
+                if (futs == null) {
                     speakPhone(message)
-                    result = "ফোনের ভয়েস (বাছাই অনুযায়ী)"
+                    parts.add("ফোনের ভয়েস (বাছাই অনুযায়ী)")
                 } else {
-                    val f = try {
-                        fut.get()
-                    } catch (e: Exception) {
-                        Speaker.Fetched(null, 0, "", 0L, "", "ত্রুটি: ${e.message}")
-                    }
-                    val pcm = f.pcm
-                    val waited = System.currentTimeMillis() - nowT
-                    if (pcm != null) {
-                        Speaker.play(this, pcm, f.rate)
-                        result = "সফল: ${f.source}, আনতে ${f.ms} ms, বাজার আগে মোট ${waited} ms" +
-                            (if (f.fail.isNotBlank()) "\nআগে ব্যর্থ: ${f.fail}" else "")
-                    } else if (Speaker.allowPhone(this)) {
-                        speakPhone(message)
-                        result = "ব্যর্থ: ${f.error} → ফোনের ভয়েস"
-                    } else {
-                        result = "ব্যর্থ: ${f.error}"
+                    for ((idx, fut) in futs.withIndex()) {
+                        val chunk = chunks[idx]
+                        val f = try {
+                            fut.get()
+                        } catch (e: Exception) {
+                            Speaker.Fetched(null, 0, "", 0L, "", "ত্রুটি: ${e.message}")
+                        }
+                        val pcm = f.pcm
+                        val waited = System.currentTimeMillis() - nowT
+                        val tag = if (chunks.size > 1) "অংশ ${idx + 1}: " else ""
+                        if (pcm != null) {
+                            Speaker.play(this, pcm, f.rate)
+                            parts.add(
+                                "$tag সফল ${f.source}, আনতে ${f.ms} ms, বাজার আগে মোট $waited ms" +
+                                    (if (f.fail.isNotBlank()) " (আগে ব্যর্থ: ${f.fail})" else "")
+                            )
+                        } else if (Speaker.allowPhone(this)) {
+                            speakPhone(chunk)
+                            parts.add("$tag ব্যর্থ: ${f.error} → ফোনের ভয়েস")
+                        } else {
+                            parts.add("$tag ব্যর্থ: ${f.error}")
+                        }
                     }
                 }
             } catch (e: Exception) {
-                result = "ত্রুটি: ${e.message}"
+                parts.add("ত্রুটি: ${e.message}")
             }
             val time = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
             saveLog(
-                "$time  অ্যাপ: $pkg\nবার্তা (${message.length} অক্ষর): ${message.take(40)}\nফলাফল: $result"
+                "$time  অ্যাপ: $pkg\nবার্তা (${message.length} অক্ষর): ${message.take(40)}\nফলাফল: " +
+                    parts.joinToString("\n")
             )
         }
     }
