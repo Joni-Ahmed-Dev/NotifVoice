@@ -372,12 +372,19 @@ object Speaker {
     /** ফোনের ভয়েস ব্যাকআপ হিসেবে আছে কি না। */
     fun allowPhone(ctx: Context): Boolean = 'p' in planOf(ctx)
 
-    /** সবসময় নোটিফিকেশন ভলিউমে বাজে (মিডিয়া ভলিউমের সাথে সম্পর্ক নেই)। */
+    /** সবসময় রিংটোন স্ট্রিমে বাজে (রিংটোন স্লাইডার মানে, মিডিয়ার সাথে সম্পর্ক নেই)। */
     fun outAttrs(@Suppress("UNUSED_PARAMETER") ctx: Context): AudioAttributes {
         return AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build()
+    }
+
+    /** রিংটোন সাইলেন্ট/ভাইব্রেট মোডে বা রিংটোন ভলিউম শূন্য হলে true: তখন কিছুই পড়া হবে না। */
+    fun isMuted(ctx: Context): Boolean {
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return true
+        return am.getStreamVolume(AudioManager.STREAM_RING) == 0
     }
 
     /** ব্লুটুথ আউটপুট থাকলে সেটা (শুধু ব্লুটুথে পাঠানোর চেষ্টা), নইলে null। */
@@ -663,6 +670,7 @@ object Speaker {
 
     /** কাঁচা ১৬-বিট মোনো অডিও বাজায় (শেষ না হওয়া পর্যন্ত অপেক্ষা করে)। শেষে ০.১ সেকেন্ড নীরবতা যোগ করে। */
     fun play(ctx: Context, data: ByteArray, rate: Int) {
+        if (isMuted(ctx)) return
         val padded = data.copyOf((data.size / 2) * 2 + (rate / 10) * 2)
         val minBuf = AudioTrack.getMinBufferSize(
             rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -726,6 +734,13 @@ class NotifVoiceService : NotificationListenerService() {
         val body = extractBody(extras).take(120)
         val message = body.ifBlank { title }
         if (message.isBlank()) return
+
+        // রিংটোন সাইলেন্ট বা ভলিউম শূন্য হলে কিছুই পড়া হবে না (API-ও ডাকা হবে না)
+        if (Speaker.isMuted(this)) {
+            val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+            saveLog("$t  অ্যাপ: ${sbn.packageName}\nফলাফল: রিংটোন সাইলেন্ট/ভলিউম শূন্য, তাই পড়া হয়নি")
+            return
+        }
 
         // একই লেখা ১০ সেকেন্ডের মধ্যে আবার এলে বাদ
         val nowT = System.currentTimeMillis()
@@ -839,6 +854,7 @@ class NotifVoiceService : NotificationListenerService() {
 
     /** ফোনের ভয়েসে পড়ে, শেষ হওয়া পর্যন্ত অপেক্ষা করে (যাতে পরের অডিওর সাথে মিশে না যায়)। */
     private fun speakPhone(text: String) {
+        if (Speaker.isMuted(this)) return
         val engine = ensureTts() ?: return
         engine.setAudioAttributes(Speaker.outAttrs(this))
         val latch = CountDownLatch(1)
