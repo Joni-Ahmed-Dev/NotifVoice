@@ -13,6 +13,7 @@ import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -71,6 +72,7 @@ class MainActivity : Activity() {
     private lateinit var logContainer: LinearLayout
     private lateinit var logCount: TextView
     private lateinit var testMsgBox: EditText
+    private lateinit var dashView: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -178,6 +180,7 @@ class MainActivity : Activity() {
                 ed.putInt("lastSlot", 1)
                 ed.apply()
                 Toast.makeText(this@MainActivity, "সেভ হয়েছে", Toast.LENGTH_SHORT).show()
+                renderDashboard()
             }
         }
         val testBtn = Button(this).apply {
@@ -231,6 +234,11 @@ class MainActivity : Activity() {
                 renderLog()
             }
         }
+        dashView = TextView(this).apply { textSize = 13f }
+        val dashRefreshBtn = Button(this).apply {
+            text = "ড্যাশবোর্ড রিফ্রেশ করুন"
+            setOnClickListener { renderDashboard() }
+        }
 
         root.addView(label("কোন ভয়েস ব্যবহার হবে (ক্রম: আগেরটা না চললে পরেরটা। \"শুধু\" বেছে নিলে ব্যর্থ হলে আর কিছু পড়া হবে না)"))
         root.addView(providerBox)
@@ -240,7 +248,7 @@ class MainActivity : Activity() {
         root.addView(elVoiceBox)
         root.addView(label("ElevenLabs মডেল (বাংলার জন্য eleven_v3)"))
         root.addView(elModelBox)
-        root.addView(label("Gemini API Key (একটায় ত্রুটি হলে নিজে পরেরটায় যাবে। দরকার নেই এমন ঘর ফাঁকা রাখুন)"))
+        root.addView(label("Gemini API Key ১-১০ (একটা একবার ব্যবহার হলে পরেরটায় যাবে, ১০-এর পর আবার ১-এ। দরকার নেই এমন ঘর ফাঁকা রাখুন)"))
         keyBoxes.forEach { root.addView(it) }
         root.addView(label("Gemini মডেল (যেমন gemini-3.8-flash-lite-tts)"))
         root.addView(modelBox)
@@ -260,6 +268,10 @@ class MainActivity : Activity() {
         root.addView(logCount)
         root.addView(logContainer)
         root.addView(clearLogBtn)
+        root.addView(label("ব্যবহারের ড্যাশবোর্ড (প্রতি Gemini API Key)"))
+        root.addView(label("সীমা প্রতি Key: RPM ৩, TPM ১০,০০০, RPD ১০। টোকেন API থেকে পাওয়া গেলে সেটা, না পেলে লেখার দৈর্ঘ্য থেকে আনুমানিক।"))
+        root.addView(dashView)
+        root.addView(dashRefreshBtn)
 
         setContentView(scroll)
     }
@@ -274,6 +286,7 @@ class MainActivity : Activity() {
         prefs.getString("inbox", null)?.let { testMsgBox.setText(it) }
         InputBus.listener = { t -> runOnUiThread { testMsgBox.setText(t) } }
         renderLog()
+        renderDashboard()
     }
 
     private fun renderLog() {
@@ -305,6 +318,33 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun renderDashboard() {
+        val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+        val dayDate = prefs.getString("dayDate", "")
+        val now = System.currentTimeMillis()
+        val minEntries = prefs.getString("usageMin", "").orEmpty()
+            .split(";").mapNotNull {
+                val p = it.split(":")
+                if (p.size == 3) Triple(p[0].toIntOrNull() ?: return@mapNotNull null, p[1].toLongOrNull() ?: return@mapNotNull null, p[2].toIntOrNull() ?: 0) else null
+            }.filter { now - it.second < 60_000 }
+        val next = prefs.getInt("lastSlot", 1)
+        val lines = ArrayList<String>()
+        for (i in 1..Speaker.SLOTS) {
+            val key = prefs.getString("key$i", "").orEmpty().trim()
+            if (key.isEmpty()) {
+                lines.add("Key $i: বসানো হয়নি")
+                continue
+            }
+            val day = if (dayDate == today) prefs.getInt("dayCount$i", 0) else 0
+            val minReq = minEntries.count { it.first == i }
+            val minTok = minEntries.filter { it.first == i }.sumOf { it.third }
+            val cool = prefs.getLong("cool$i", 0L) > now
+            val mark = if (i == next) " ← পরেরবার এইটা" else ""
+            lines.add("Key $i: আজ $day/10, গত ১ মিনিটে $minReq/৩ অনুরোধ, $minTok/১০,০০০ টোকেন, " + (if (cool) "বিশ্রামে" else "চালু") + mark)
+        }
+        dashView.text = lines.joinToString("\n")
+    }
+
     private fun phoneSpeak(msg: String) {
         var engine: TextToSpeech? = null
         engine = TextToSpeech(this) { st ->
@@ -324,7 +364,7 @@ object Speaker {
 
     private const val SAMPLE_RATE = 24000
     private const val BUDGET_MS = 30000L
-    const val SLOTS = 5
+    const val SLOTS = 10
 
     /** fetch-এর ফল। error == null মানে সফল (pcm আছে)। */
     class Fetched(
@@ -338,7 +378,7 @@ object Speaker {
 
     private class Got(val pcm: ByteArray?, val rate: Int, val source: String, val error: String?)
 
-    private class Result(val pcm: ByteArray?, val error: String?, val code: Int, val restMs: Long)
+    private class Result(val pcm: ByteArray?, val error: String?, val code: Int, val restMs: Long, val tokens: Int = 0)
 
     /** সেটিং থেকে ভয়েসের ক্রম, যেমন [g, e, p]। */
     fun planOf(ctx: Context): List<Char> {
@@ -363,6 +403,35 @@ object Speaker {
         val am = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return true
         return am.getStreamVolume(AudioManager.STREAM_RING) == 0
+    }
+
+    /** স্ক্রিন চালু (ইন্টার‌্যাক্টিভ) থাকলে true: তখন নোটিফিকেশন পড়া হবে না। */
+    fun isScreenOn(ctx: Context): Boolean {
+        val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+        return pm.isInteractive
+    }
+
+    /** ব্যবহারের হিসাব রাখা: দিনের হিসাব আর গত ১ মিনিটের হিসাব। */
+    @Synchronized
+    fun recordUsage(ctx: Context, slot: Int, tokens: Int) {
+        val prefs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+        val ed = prefs.edit()
+        val dateChanged = prefs.getString("dayDate", "") != today
+        if (dateChanged) {
+            ed.putString("dayDate", today)
+            for (i in 1..SLOTS) ed.putInt("dayCount$i", 0)
+        }
+        ed.putInt("dayCount$slot", if (dateChanged) 1 else prefs.getInt("dayCount$slot", 0) + 1)
+        val now = System.currentTimeMillis()
+        val kept = prefs.getString("usageMin", "").orEmpty()
+            .split(";").filter { it.isNotBlank() }
+            .filter {
+                val ts = it.split(":").getOrNull(1)?.toLongOrNull() ?: 0L
+                now - ts < 60_000
+            }.takeLast(200)
+        ed.putString("usageMin", (kept + "$slot:$now:$tokens").joinToString(";"))
+        ed.apply()
     }
 
     /** ব্লুটুথ আউটপুট থাকলে সেটা (শুধু ব্লুটুথে পাঠানোর চেষ্টা), নইলে null। */
@@ -528,15 +597,18 @@ object Speaker {
                 val r: Result = try {
                     request(key, model, voice, text, minOf(remaining, 20000L).toInt())
                 } catch (e: IOException) {
+                    recordUsage(ctx, slot, (text.length + 3) / 4)
                     errors.add("key $slot: ইন্টারনেট ত্রুটি: ${e.message}")
                     continue@outer
                 } catch (e: Exception) {
                     Result(null, "ত্রুটি: ${e.message}", 0, 0L)
                 }
+                recordUsage(ctx, slot, if (r.tokens > 0) r.tokens else (text.length + 3) / 4)
                 val raw = r.pcm
                 if (raw != null) {
                     val (data, rate) = decodeAudio(raw)
-                    prefs.edit().putInt("lastSlot", slot).apply()
+                    // একবার ব্যবহারের পর পরের Key-তে যাওয়া, ১০-এর পর আবার ১-এ
+                    prefs.edit().putInt("lastSlot", slot % SLOTS + 1).apply()
                     return Got(data, rate, "Gemini key $slot", null)
                 }
                 errors.add("key $slot: ${r.error}")
@@ -608,7 +680,8 @@ object Speaker {
                 val block = root.optJSONObject("promptFeedback")?.optString("blockReason").orEmpty()
                 return Result(null, "অডিও আসেনি ($reason $block)".trim(), 0, 0L)
             }
-            return Result(Base64.decode(b64, Base64.DEFAULT), null, code, 0L)
+            val tokens = root.optJSONObject("usageMetadata")?.optInt("totalTokenCount", 0) ?: 0
+            return Result(Base64.decode(b64, Base64.DEFAULT), null, code, 0L, tokens)
         } catch (e: Exception) {
             // সফল হলে disconnect করা হয় না, যাতে সংযোগ আবার কাজে লাগে (দ্রুত হয়)
             conn.disconnect()
@@ -739,6 +812,18 @@ class NotifVoiceService : NotificationListenerService() {
         // একই notification অল্প সময়ের মধ্যে পুনরায় এলে বাদ
         if (isDuplicate(message)) return
 
+        // স্ক্রিন চালু থাকলে পড়া হবে না (API-ও ডাকা হবে না), লেখাটা শুধু ইনপুট বক্সে থাকবে
+        if (Speaker.isScreenOn(this)) {
+            saveInbox(message)
+            InputBus.listener?.invoke(message)
+            saveLog(
+                "স্ক্রিন চালু থাকায় পড়া হয়নি\n" +
+                "Target: $TARGET_PACKAGE\n" +
+                "বার্তা: ${message.take(100)}"
+            )
+            return
+        }
+
         // ধাপ ১: নোটিফিকেশনের লেখা নিচের ইনপুট বক্সে রাখা
         saveInbox(message)
 
@@ -761,8 +846,7 @@ class NotifVoiceService : NotificationListenerService() {
         // ধাপ ২: ইনপুট বক্সে রাখা লেখা দিয়ে ৩. ভয়েস পরীক্ষা করুন বাটনের লজিক চালানো
         // (অ্যাপ বন্ধ থাকলেও একই লজিক সার্ভিস থেকে চলে, বাটনে হাত দিয়ে চাপতে হয় না)
         playPool.execute {
-            // টেস্ট বাটনের মতো key 1 থেকে শুরু, যাতে একই key ক্রমে চেষ্টা হয়
-            getSharedPreferences("cfg", Context.MODE_PRIVATE).edit().putInt("lastSlot", 1).apply()
+            // রাউন্ড-রবিন চলবে: আগেরবার যে Key ব্যবহার হয়েছে, তার পরেরটা থেকে শুরু
             val result = Speaker.fetch(this, message)
             if (result.pcm != null) {
                 Speaker.play(this, result.pcm, result.rate)
