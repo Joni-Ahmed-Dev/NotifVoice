@@ -60,11 +60,18 @@ fun normProvider(p: String?): String = when (p) {
     else -> p
 }
 
+/** নোটিফিকেশনের লেখা অ্যাপের ইনপুট বক্সে দেখানোর সেতু (অ্যাপ খোলা থাকলে সঙ্গে সঙ্গে দেখায়)। */
+object InputBus {
+    @Volatile
+    var listener: ((String) -> Unit)? = null
+}
+
 class MainActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
     private lateinit var appsSummary: TextView
     private lateinit var logView: TextView
+    private lateinit var testMsgBox: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -211,8 +218,13 @@ class MainActivity : Activity() {
                 }
             }
         }
-        val testMsgBox = EditText(this).apply {
-            setText("আসসালামু আলাইকুম। আপনার একটি নতুন বার্তা এসেছে, নোটিফিকেশন ঠিকঠাক কাজ করছে।")
+        testMsgBox = EditText(this).apply {
+            setText(
+                prefs.getString(
+                    "inbox",
+                    "আসসালামু আলাইকুম। আপনার একটি নতুন বার্তা এসেছে, নোটিফিকেশন ঠিকঠাক কাজ করছে।"
+                )
+            )
         }
         val notifTestBtn = Button(this).apply {
             text = "৫. নোটিফিকেশন পাঠিয়ে পরীক্ষা করুন"
@@ -243,7 +255,7 @@ class MainActivity : Activity() {
         root.addView(pickBtn)
         root.addView(saveBtn)
         root.addView(testBtn)
-        root.addView(label("পরীক্ষার বার্তা (বাংলায় যা খুশি লিখুন)"))
+        root.addView(label("ইনপুট বক্স: নোটিফিকেশনের লেখা এখানে এসে বসে, সেখান থেকেই পড়া হয়। চাইলে নিজেও লিখে পরীক্ষা করতে পারেন"))
         root.addView(testMsgBox)
         root.addView(notifTestBtn)
         root.addView(label("শেষ ৬টা নোটিফিকেশনের হিসাব (নতুনটা উপরে। অ্যাপে ফিরে এলে নতুন হয়)"))
@@ -253,8 +265,15 @@ class MainActivity : Activity() {
         refreshSummary()
     }
 
+    override fun onPause() {
+        InputBus.listener = null
+        super.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
+        prefs.getString("inbox", null)?.let { testMsgBox.setText(it) }
+        InputBus.listener = { t -> runOnUiThread { testMsgBox.setText(t) } }
         logView.text = prefs.getString("lastLog", "")
             .orEmpty()
             .ifBlank { "এখনো কোনো নোটিফিকেশন পড়া হয়নি" }
@@ -749,6 +768,10 @@ class NotifVoiceService : NotificationListenerService() {
             lastText = message
             lastTime = nowT
         }
+
+        // নোটিফিকেশনের লেখা ইনপুট বক্সে বসানো (অ্যাপ খোলা থাকলে সঙ্গে সঙ্গে দেখা যায়)
+        prefs.edit().putString("inbox", message).apply()
+        InputBus.listener?.invoke(message)
 
         val pkg = sbn.packageName
         val phoneOnly = Speaker.planOf(this) == listOf('p')
