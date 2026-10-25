@@ -322,7 +322,7 @@ class MainActivity : Activity() {
 object Speaker {
 
     private const val SAMPLE_RATE = 24000
-    private const val BUDGET_MS = 15000L
+    private const val BUDGET_MS = 30000L
     const val SLOTS = 5
 
     /** fetch-এর ফল। error == null মানে সফল (pcm আছে)। */
@@ -527,7 +527,8 @@ object Speaker {
                 val r: Result = try {
                     request(key, model, voice, text, minOf(remaining, 20000L).toInt())
                 } catch (e: IOException) {
-                    return Got(null, 0, "", "ইন্টারনেট ত্রুটি: ${e.message}")
+                    errors.add("key $slot: ইন্টারনেট ত্রুটি: ${e.message}")
+                    continue@outer
                 } catch (e: Exception) {
                     Result(null, "ত্রুটি: ${e.message}", 0, 0L)
                 }
@@ -685,7 +686,6 @@ object Speaker {
 
 class NotifVoiceService : NotificationListenerService() {
 
-    private val fetchPool = Executors.newFixedThreadPool(2)
     private val playPool = Executors.newSingleThreadExecutor()
 
     @Volatile
@@ -757,33 +757,19 @@ class NotifVoiceService : NotificationListenerService() {
             return
         }
 
-        // Online TTS background-এ তৈরি
-        val future = fetchPool.submit(Callable<Speaker.Fetched> {
-            Speaker.fetch(this, message)
-        })
-
-        // Audio serially play
+        // ভয়েস পরীক্ষা বাটনের মতোই: একই থ্রেডে fetch, তারপর play, কোনো আলাদা fetch queue না
         playPool.execute {
-            val result = try {
-                future.get()
-            } catch (e: Exception) {
-                Speaker.Fetched(
-                    pcm = null,
-                    rate = 0,
-                    source = "",
-                    ms = 0,
-                    fail = "",
-                    error = "ত্রুটি: ${e.message}"
-                )
-            }
-
+            // টেস্ট বাটনের মতো key 1 থেকে শুরু, যাতে একই key ক্রমে চেষ্টা হয়
+            getSharedPreferences("cfg", Context.MODE_PRIVATE).edit().putInt("lastSlot", 1).apply()
+            val result = Speaker.fetch(this, message)
             if (result.pcm != null) {
                 Speaker.play(this, result.pcm, result.rate)
                 saveLog(
                     "Target: $TARGET_PACKAGE\n" +
                     "বার্তা: ${message.take(100)}\n" +
                     "ফলাফল: ${result.source}\n" +
-                    "সময়: ${secText(result.ms)}"
+                    "সময়: ${secText(result.ms)}" +
+                    (if (result.fail.isNotBlank()) "\nআগে ব্যর্থ: ${result.fail}" else "")
                 )
             } else if (Speaker.allowPhone(this)) {
                 speakPhone(message)
@@ -937,7 +923,6 @@ class NotifVoiceService : NotificationListenerService() {
     override fun onDestroy() {
         tts?.shutdown()
         tts = null
-        fetchPool.shutdownNow()
         playPool.shutdownNow()
         super.onDestroy()
     }
