@@ -7,28 +7,12 @@ android {
     namespace = "com.example.notifvoice"
     compileSdk = 34
 
-    signingConfigs {
-        getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
-            storeType = "PKCS12"
-        }
-    }
-
     defaultConfig {
         applicationId = "com.example.notifvoice"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
-    }
-
-    buildTypes {
-        getByName("debug") {
-            signingConfig = signingConfigs.getByName("debug")
-        }
+        versionCode = 2
+        versionName = "1.1"
     }
 
     compileOptions {
