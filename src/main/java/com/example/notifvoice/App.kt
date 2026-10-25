@@ -1,11 +1,14 @@
 package com.example.notifvoice
 
 import android.app.Activity
-import android.graphics.Color
+import android.app.AlertDialog
 import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
@@ -14,6 +17,7 @@ import android.media.AudioTrack
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import android.graphics.Color
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -47,8 +51,6 @@ const val DEFAULT_KEY = ""
 const val DEFAULT_MODEL = "gemini-3.8-flash-lite-tts"
 const val DEFAULT_VOICE = "Kore"
 const val DEFAULT_EL_MODEL = "eleven_v3"
-// শুধু Muse অ্যাপের নোটিফিকেশন: Muse from Meta, Android package
-const val TARGET_PACKAGE = "com.facebook.aura"
 const val LOG_SEP = "\n--------\n"
 
 // g = Gemini, e = ElevenLabs, p = ফোনের ভয়েস। ক্রম মানে আগেরটা না চললে পরেরটা।
@@ -69,10 +71,11 @@ object InputBus {
 class MainActivity : Activity() {
 
     private lateinit var prefs: SharedPreferences
-    private lateinit var logContainer: LinearLayout
+    private lateinit var appsSummary: TextView
     private lateinit var logCount: TextView
-    private lateinit var testMsgBox: EditText
+    private lateinit var logContainer: LinearLayout
     private lateinit var dashView: TextView
+    private lateinit var testMsgBox: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -156,14 +159,20 @@ class MainActivity : Activity() {
             val cur = prefs.getString("voice", DEFAULT_VOICE)
             setSelection(voices.indexOf(cur).coerceAtLeast(0))
         }
+        appsSummary = TextView(this).apply { textSize = 14f }
+
         val accessBtn = Button(this).apply {
             text = "১. নোটিফিকেশন অ্যাক্সেস চালু করুন"
             setOnClickListener {
                 startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
             }
         }
+        val pickBtn = Button(this).apply {
+            text = "২. অ্যাপ বেছে নিন"
+            setOnClickListener { pickApps() }
+        }
         val saveBtn = Button(this).apply {
-            text = "২. সেটিংস সেভ করুন"
+            text = "৩. সেটিংস সেভ করুন"
             setOnClickListener {
                 val ed = prefs.edit()
                 ed.putString("provider", providerValues[providerBox.selectedItemPosition])
@@ -184,11 +193,10 @@ class MainActivity : Activity() {
             }
         }
         val testBtn = Button(this).apply {
-            text = "৩. ভয়েস পরীক্ষা করুন"
+            text = "৪. ভয়েস পরীক্ষা করুন"
             setOnClickListener {
                 saveBtn.performClick()
-                val msg = testMsgBox.text.toString().trim()
-                    .ifBlank { "আসসালামু আলাইকুম। এটি একটি পরীক্ষামূলক বার্তা।" }
+                val msg = "আসসালামু আলাইকুম। এটি একটি পরীক্ষামূলক বার্তা।"
                 val ctx = this@MainActivity
                 if (Speaker.planOf(ctx) == listOf('p')) {
                     phoneSpeak(msg)
@@ -223,6 +231,13 @@ class MainActivity : Activity() {
                 )
             )
         }
+        val notifTestBtn = Button(this).apply {
+            text = "৫. নোটিফিকেশন পাঠিয়ে পরীক্ষা করুন"
+            setOnClickListener {
+                saveBtn.performClick()
+                sendTestNotification(testMsgBox.text.toString())
+            }
+        }
         logCount = TextView(this).apply { textSize = 13f }
         logContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -248,22 +263,21 @@ class MainActivity : Activity() {
         root.addView(elVoiceBox)
         root.addView(label("ElevenLabs মডেল (বাংলার জন্য eleven_v3)"))
         root.addView(elModelBox)
-        root.addView(label("Gemini API Key ১-১০ (একটা একবার ব্যবহার হলে পরেরটায় যাবে, ১০-এর পর আবার ১-এ। দরকার নেই এমন ঘর ফাঁকা রাখুন)"))
+        root.addView(label("Gemini API Key ১-৯ (একটা একবার ব্যবহার হলে পরেরটায় যাবে, ৯-এর পর আবার ১-এ। দরকার নেই এমন ঘর ফাঁকা রাখুন)"))
         keyBoxes.forEach { root.addView(it) }
         root.addView(label("Gemini মডেল (যেমন gemini-3.8-flash-lite-tts)"))
         root.addView(modelBox)
         root.addView(label("Gemini ভয়েস"))
         root.addView(voiceBox)
-        root.addView(label("Target App: Muse (Meta)"))
-        root.addView(TextView(this).apply {
-            text = "com.facebook.aura"
-            textSize = 14f
-        })
+        root.addView(label("কোন অ্যাপের নোটিফিকেশন পড়া হবে"))
+        root.addView(appsSummary)
         root.addView(accessBtn)
+        root.addView(pickBtn)
         root.addView(saveBtn)
         root.addView(testBtn)
         root.addView(label("ইনপুট বক্স: নোটিফিকেশনের লেখা এখানে এসে বসে, সেখান থেকেই পড়া হয়। চাইলে নিজেও লিখে পরীক্ষা করতে পারেন"))
         root.addView(testMsgBox)
+        root.addView(notifTestBtn)
         root.addView(label("শেষ নোটিফিকেশনের হিসাব (নতুনটা উপরে, অ্যাপে ফিরে এলে নতুন হয়)"))
         root.addView(logCount)
         root.addView(logContainer)
@@ -274,6 +288,7 @@ class MainActivity : Activity() {
         root.addView(dashRefreshBtn)
 
         setContentView(scroll)
+        refreshSummary()
     }
 
     override fun onPause() {
@@ -356,15 +371,82 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun sendTestNotification(text: String) {
+        if (text.isBlank()) {
+            Toast.makeText(this, "আগে বার্তা লিখুন", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+            Toast.makeText(this, "অনুমতি দিন, তারপর আবার চাপুন", Toast.LENGTH_LONG).show()
+            return
+        }
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = "nv_test"
+        nm.createNotificationChannel(
+            NotificationChannel(channelId, "পরীক্ষার নোটিফিকেশন", NotificationManager.IMPORTANCE_LOW)
+        )
+        val n = Notification.Builder(this, channelId)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle("Notif Voice পরীক্ষা")
+            .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .build()
+        nm.notify((System.currentTimeMillis() % 100000).toInt(), n)
+        Toast.makeText(this, "নোটিফিকেশন পাঠানো হয়েছে", Toast.LENGTH_SHORT).show()
+    }
 
+    private fun refreshSummary() {
+        val pm = packageManager
+        val set = prefs.getStringSet("apps", emptySet()) ?: emptySet()
+        appsSummary.text = if (set.isEmpty()) {
+            "কোনো অ্যাপ বাছা হয়নি"
+        } else {
+            set.joinToString(", ") { pkg ->
+                try {
+                    pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                } catch (e: Exception) {
+                    pkg
+                }
+            }
+        }
+    }
 
+    private fun pickApps() {
+        val pm = packageManager
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = pm.queryIntentActivities(intent, 0)
+            .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
+
+        val selected = (prefs.getStringSet("apps", emptySet()) ?: emptySet()).toMutableSet()
+        val checked = BooleanArray(apps.size) { selected.contains(apps[it].first) }
+
+        AlertDialog.Builder(this)
+            .setTitle("অ্যাপ বেছে নিন")
+            .setMultiChoiceItems(
+                apps.map { it.second }.toTypedArray(), checked
+            ) { _, i, isChecked ->
+                if (isChecked) selected.add(apps[i].first) else selected.remove(apps[i].first)
+            }
+            .setPositiveButton("ঠিক আছে") { _, _ ->
+                prefs.edit().putStringSet("apps", selected).apply()
+                refreshSummary()
+            }
+            .setNegativeButton("বাতিল", null)
+            .show()
+    }
 }
 
 object Speaker {
 
     private const val SAMPLE_RATE = 24000
-    private const val BUDGET_MS = 30000L
-    const val SLOTS = 10
+    private const val BUDGET_MS = 15000L
+    const val SLOTS = 9
 
     /** fetch-এর ফল। error == null মানে সফল (pcm আছে)। */
     class Fetched(
@@ -552,14 +634,14 @@ object Speaker {
                 }
                 return Got(null, 0, "", "ত্রুটি $code: ${msg.take(80)}")
             }
-            val pcm = c.inputStream.use { it.readBytes() }
+            val pcm = c.inputStream.readBytes()
             Got(pcm, SAMPLE_RATE, "ElevenLabs", null)
         } catch (e: IOException) {
-            conn?.disconnect()
             Got(null, 0, "", "ইন্টারনেট ত্রুটি: ${e.message}")
         } catch (e: Exception) {
-            conn?.disconnect()
             Got(null, 0, "", "ত্রুটি: ${e.message}")
+        } finally {
+            conn?.disconnect()
         }
     }
 
@@ -598,8 +680,7 @@ object Speaker {
                     request(key, model, voice, text, minOf(remaining, 20000L).toInt())
                 } catch (e: IOException) {
                     recordUsage(ctx, slot, (text.length + 3) / 4)
-                    errors.add("key $slot: ইন্টারনেট ত্রুটি: ${e.message}")
-                    continue@outer
+                    return Got(null, 0, "", "ইন্টারনেট ত্রুটি: ${e.message}")
                 } catch (e: Exception) {
                     Result(null, "ত্রুটি: ${e.message}", 0, 0L)
                 }
@@ -607,7 +688,7 @@ object Speaker {
                 val raw = r.pcm
                 if (raw != null) {
                     val (data, rate) = decodeAudio(raw)
-                    // একবার ব্যবহারের পর পরের Key-তে যাওয়া, ১০-এর পর আবার ১-এ
+                    // একবার ব্যবহারের পর পরের Key-তে যাওয়া, ৯-এর পর আবার ১-এ
                     prefs.edit().putInt("lastSlot", slot % SLOTS + 1).apply()
                     return Got(data, rate, "Gemini key $slot", null)
                 }
@@ -682,10 +763,8 @@ object Speaker {
             }
             val tokens = root.optJSONObject("usageMetadata")?.optInt("totalTokenCount", 0) ?: 0
             return Result(Base64.decode(b64, Base64.DEFAULT), null, code, 0L, tokens)
-        } catch (e: Exception) {
-            // সফল হলে disconnect করা হয় না, যাতে সংযোগ আবার কাজে লাগে (দ্রুত হয়)
+        } finally {
             conn.disconnect()
-            throw e
         }
     }
 
@@ -760,6 +839,8 @@ object Speaker {
 
 class NotifVoiceService : NotificationListenerService() {
 
+    // অডিও আনা একসাথে (২টা পর্যন্ত), বাজানো এক এক করে নোটিফিকেশনের ক্রমে
+    private val fetchPool = Executors.newFixedThreadPool(2)
     private val playPool = Executors.newSingleThreadExecutor()
 
     @Volatile
@@ -773,242 +854,165 @@ class NotifVoiceService : NotificationListenerService() {
     private var lastTime = 0L
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        val apps = prefs.getStringSet("apps", emptySet()) ?: emptySet()
+        // নিজের অ্যাপের পরীক্ষার নোটিফিকেশনও ধরবে
+        if (sbn.packageName !in apps && sbn.packageName != packageName) return
 
-        // শুধুমাত্র Target App
-        if (sbn.packageName != TARGET_PACKAGE) return
+        val n = sbn.notification
+        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
 
-        val notification = sbn.notification
-
-        // Group summary বাদ
-        if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) {
-            return
-        }
-
-        val extras = notification.extras
-
-        val title = extras
-            .getCharSequence(Notification.EXTRA_TITLE)
-            ?.toString()
-            ?.trim()
-            .orEmpty()
-
-        val body = extractNotificationText(extras)
-
-        // ১২০ অক্ষরের ক্যাপ রাখা হয়েছে: গতি ও কোটা বাঁচাতে
-        val message = body.ifBlank { title }.trim().take(120)
-
+        val extras = n.extras
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val body = extractBody(extras).take(120)
+        val message = body.ifBlank { title }
         if (message.isBlank()) return
 
-        // Silent / Vibrate / Ring volume 0 হলে API call না করা
+        // রিংটোন সাইলেন্ট বা ভলিউম শূন্য হলে কিছুই পড়া হবে না (API-ও ডাকা হবে না)
         if (Speaker.isMuted(this)) {
-            saveLog(
-                "অডিও বন্ধ\n" +
-                "Target: $TARGET_PACKAGE\n" +
-                "কারণ: ফোন Silent/Vibrate অথবা Ring volume 0"
-            )
+            val t = SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())
+            saveLog("$t  অ্যাপ: ${sbn.packageName}\nবার্তা: ${message.take(100)}\nফলাফল: রিংটোন সাইলেন্ট/ভলিউম শূন্য, তাই পড়া হয়নি")
             return
         }
 
-        // একই notification অল্প সময়ের মধ্যে পুনরায় এলে বাদ
-        if (isDuplicate(message)) return
+        // একই লেখা ১০ সেকেন্ডের মধ্যে আবার এলে বাদ
+        val nowT = System.currentTimeMillis()
+        synchronized(dedupeLock) {
+            if (message == lastText && nowT - lastTime < 10000) return
+            lastText = message
+            lastTime = nowT
+        }
 
         // স্ক্রিন চালু থাকলে পড়া হবে না (API-ও ডাকা হবে না), লেখাটা শুধু ইনপুট বক্সে থাকবে
         if (Speaker.isScreenOn(this)) {
-            saveInbox(message)
+            prefs.edit().putString("inbox", message).apply()
             InputBus.listener?.invoke(message)
-            saveLog(
-                "স্ক্রিন চালু থাকায় পড়া হয়নি\n" +
-                "Target: $TARGET_PACKAGE\n" +
-                "বার্তা: ${message.take(100)}"
-            )
+            val t = SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())
+            saveLog("$t  অ্যাপ: ${sbn.packageName}\nবার্তা: ${message.take(100)}\nফলাফল: স্ক্রিন চালু থাকায় পড়া হয়নি")
             return
         }
 
-        // ধাপ ১: নোটিফিকেশনের লেখা নিচের ইনপুট বক্সে রাখা
-        saveInbox(message)
-
-        // অ্যাপ খোলা থাকলে UI-তে পাঠানো
+        // নোটিফিকেশনের লেখা ইনপুট বক্সে বসানো (অ্যাপ খোলা থাকলে সঙ্গে সঙ্গে দেখা যায়)
+        prefs.edit().putString("inbox", message).apply()
         InputBus.listener?.invoke(message)
 
-        // ফোনের ভয়েস হলে API দরকার নেই
-        if (Speaker.planOf(this) == listOf('p')) {
-            playPool.execute {
-                speakPhone(message)
-                saveLog(
-                    "Target: $TARGET_PACKAGE\n" +
-                    "বার্তা: ${message.take(100)}\n" +
-                    "ফলাফল: ফোনের ভয়েস"
-                )
-            }
-            return
+        val pkg = sbn.packageName
+        val phoneOnly = Speaker.planOf(this) == listOf('p')
+        val fut: Future<Speaker.Fetched>? = if (phoneOnly) {
+            null
+        } else {
+            fetchPool.submit(Callable<Speaker.Fetched> { Speaker.fetch(this, message) })
         }
 
-        // ধাপ ২: ইনপুট বক্সে রাখা লেখা দিয়ে ৩. ভয়েস পরীক্ষা করুন বাটনের লজিক চালানো
-        // (অ্যাপ বন্ধ থাকলেও একই লজিক সার্ভিস থেকে চলে, বাটনে হাত দিয়ে চাপতে হয় না)
         playPool.execute {
-            // রাউন্ড-রবিন চলবে: আগেরবার যে Key ব্যবহার হয়েছে, তার পরেরটা থেকে শুরু
-            val result = Speaker.fetch(this, message)
-            if (result.pcm != null) {
-                Speaker.play(this, result.pcm, result.rate)
-                saveLog(
-                    "Target: $TARGET_PACKAGE\n" +
-                    "বার্তা: ${message.take(100)}\n" +
-                    "ফলাফল: ${result.source}\n" +
-                    "সময়: ${secText(result.ms)}" +
-                    (if (result.fail.isNotBlank()) "\nআগে ব্যর্থ: ${result.fail}" else "")
-                )
-            } else if (Speaker.allowPhone(this)) {
-                speakPhone(message)
-                saveLog(
-                    "Target: $TARGET_PACKAGE\n" +
-                    "বার্তা: ${message.take(100)}\n" +
-                    "ফলাফল: Online TTS ব্যর্থ → ফোনের ভয়েস\n" +
-                    "কারণ: ${result.error}"
-                )
-            } else {
-                saveLog(
-                    "Target: $TARGET_PACKAGE\n" +
-                    "বার্তা: ${message.take(100)}\n" +
-                    "ফলাফল: ব্যর্থ\n" +
-                    "কারণ: ${result.error}"
-                )
-            }
-        }
-    }
-
-    private fun isDuplicate(text: String): Boolean {
-        val now = System.currentTimeMillis()
-        synchronized(dedupeLock) {
-            if (text == lastText && now - lastTime < 10_000) {
-                return true
-            }
-            lastText = text
-            lastTime = now
-            return false
-        }
-    }
-
-    private fun saveInbox(text: String) {
-        getSharedPreferences("cfg", Context.MODE_PRIVATE)
-            .edit()
-            .putString("inbox", text)
-            .apply()
-    }
-
-    private fun extractNotificationText(extras: Bundle): String {
-        val candidates = mutableListOf<String>()
-
-        extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()?.let {
-            if (it.isNotBlank()) candidates.add(it)
-        }
-
-        extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim()?.let {
-            if (it.isNotBlank()) candidates.add(it)
-        }
-
-        extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.let { lines ->
-            val text = lines
-                .map { it.toString().trim() }
-                .filter { it.isNotBlank() }
-                .joinToString(". ")
-            if (text.isNotBlank()) {
-                candidates.add(text)
-            }
-        }
-
-        val messages = extras.getParcelableArray(Notification.EXTRA_MESSAGES)
-        if (messages != null) {
-            val text = messages
-                .mapNotNull {
-                    (it as? Bundle)
-                        ?.getCharSequence("text")
-                        ?.toString()
+            var result: String
+            try {
+                if (fut == null) {
+                    speakPhone(message)
+                    result = "ফোনের ভয়েস (বাছাই অনুযায়ী)"
+                } else {
+                    val f = try {
+                        fut.get()
+                    } catch (e: Exception) {
+                        Speaker.Fetched(null, 0, "", 0L, "", "ত্রুটি: ${e.message}")
+                    }
+                    val pcm = f.pcm
+                    val waited = System.currentTimeMillis() - nowT
+                    if (pcm != null) {
+                        Speaker.play(this, pcm, f.rate)
+                        result = "${f.source}\nসময়: ${String.format(Locale.US, "%.1f সেকেন্ড", f.ms / 1000.0)}" +
+                            (if (f.fail.isNotBlank()) "\nআগে ব্যর্থ: ${f.fail}" else "")
+                    } else if (Speaker.allowPhone(this)) {
+                        speakPhone(message)
+                        result = "ব্যর্থ: ${f.error} → ফোনের ভয়েস"
+                    } else {
+                        result = "ব্যর্থ: ${f.error}"
+                    }
                 }
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .takeLast(2)
-                .joinToString(". ")
-            if (text.isNotBlank()) {
-                candidates.add(text)
+            } catch (e: Exception) {
+                result = "ত্রুটি: ${e.message}"
             }
+            val time = SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())
+            saveLog(
+                "$time  অ্যাপ: $pkg\nবার্তা: ${message.take(100)}\nফলাফল: $result"
+            )
         }
-
-        return candidates.maxByOrNull { it.length }.orEmpty()
-    }
-
-    private fun secText(ms: Long): String {
-        return String.format(Locale.US, "%.1f সেকেন্ড", ms / 1000.0)
     }
 
     private fun saveLog(entry: String) {
-        val prefs = getSharedPreferences("cfg", Context.MODE_PRIVATE)
-        val old = prefs.getString("lastLog", "").orEmpty()
-        val logs = if (old.isBlank()) {
-            emptyList()
-        } else {
-            old.split(LOG_SEP)
-        }
-        val updated = (listOf(
-            "${SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())}  $entry"
-        ) + logs).take(6)
-        prefs.edit().putString("lastLog", updated.joinToString(LOG_SEP)).apply()
+        val p = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        val old = p.getString("lastLog", "").orEmpty()
+        val items = if (old.isBlank()) emptyList() else old.split(LOG_SEP)
+        val all = (listOf(entry) + items).take(6)
+        p.edit().putString("lastLog", all.joinToString(LOG_SEP)).apply()
     }
 
+    private fun extractBody(extras: android.os.Bundle): String {
+        val c = ArrayList<String>()
+        extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.let { c.add(it) }
+        extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.let { c.add(it) }
+        extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.let { lines ->
+            c.add(lines.joinToString(". "))
+        }
+        val msgs = extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+        if (msgs != null) {
+            val last = msgs.mapNotNull {
+                (it as? android.os.Bundle)?.getCharSequence("text")?.toString()
+            }.takeLast(2).joinToString(". ")
+            c.add(last)
+        }
+        return c.filter { it.isNotBlank() }.maxByOrNull { it.length } ?: ""
+    }
+
+    /** ফোনের ভয়েস তৈরি (একবারই)। ব্যাকগ্রাউন্ড থ্রেডে চালাতে হবে। */
     private fun ensureTts(): TextToSpeech? {
         tts?.let { return it }
         val latch = CountDownLatch(1)
-        val success = AtomicBoolean(false)
-        val engine = TextToSpeech(applicationContext) { status ->
-            success.set(status == TextToSpeech.SUCCESS)
+        val ok = AtomicBoolean(false)
+        val engine = TextToSpeech(applicationContext) { st ->
+            ok.set(st == TextToSpeech.SUCCESS)
             latch.countDown()
         }
-        if (!latch.await(5, TimeUnit.SECONDS)) {
-            engine.shutdown()
-            return null
-        }
-        if (!success.get()) {
+        latch.await(5, TimeUnit.SECONDS)
+        if (!ok.get()) {
             engine.shutdown()
             return null
         }
         engine.language = Locale("bn", "BD")
-        engine.setOnUtteranceProgressListener(
-            object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
-
-                override fun onDone(utteranceId: String?) {
-                    ttsDone?.countDown()
-                }
-
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    ttsDone?.countDown()
-                }
-
-                override fun onStop(utteranceId: String?, interrupted: Boolean) {
-                    ttsDone?.countDown()
-                }
+        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                ttsDone?.countDown()
             }
-        )
+
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                ttsDone?.countDown()
+            }
+
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                ttsDone?.countDown()
+            }
+        })
         tts = engine
         return engine
     }
 
+    /** ফোনের ভয়েসে পড়ে, শেষ হওয়া পর্যন্ত অপেক্ষা করে (যাতে পরের অডিওর সাথে মিশে না যায়)। */
     private fun speakPhone(text: String) {
         if (Speaker.isMuted(this)) return
         val engine = ensureTts() ?: return
         engine.setAudioAttributes(Speaker.outAttrs(this))
         val latch = CountDownLatch(1)
         ttsDone = latch
-        val result = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "notif_voice")
-        if (result != TextToSpeech.SUCCESS) {
-            return
-        }
+        val r = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "nv")
+        if (r != TextToSpeech.SUCCESS) return
         latch.await(30, TimeUnit.SECONDS)
     }
 
     override fun onDestroy() {
         tts?.shutdown()
-        tts = null
+        fetchPool.shutdownNow()
         playPool.shutdownNow()
         super.onDestroy()
     }
