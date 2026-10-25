@@ -16,7 +16,6 @@ import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
 import android.os.Bundle
-import android.os.PowerManager
 import android.graphics.Color
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
@@ -487,12 +486,6 @@ object Speaker {
         return am.getStreamVolume(AudioManager.STREAM_RING) == 0
     }
 
-    /** স্ক্রিন চালু (ইন্টার‌্যাক্টিভ) থাকলে true: তখন নোটিফিকেশন পড়া হবে না। */
-    fun isScreenOn(ctx: Context): Boolean {
-        val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
-        return pm.isInteractive
-    }
-
     /** ব্যবহারের হিসাব রাখা: দিনের হিসাব আর গত ১ মিনিটের হিসাব। */
     @Synchronized
     fun recordUsage(ctx: Context, slot: Int, tokens: Int) {
@@ -881,15 +874,6 @@ class NotifVoiceService : NotificationListenerService() {
             if (message == lastText && nowT - lastTime < 10000) return
             lastText = message
             lastTime = nowT
-        }
-
-        // স্ক্রিন চালু থাকলে পড়া হবে না (API-ও ডাকা হবে না), লেখাটা শুধু ইনপুট বক্সে থাকবে
-        if (Speaker.isScreenOn(this)) {
-            prefs.edit().putString("inbox", message).apply()
-            InputBus.listener?.invoke(message)
-            val t = SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())
-            saveLog("$t  অ্যাপ: ${sbn.packageName}\nবার্তা: ${message.take(100)}\nফলাফল: স্ক্রিন চালু থাকায় পড়া হয়নি")
-            return
         }
 
         // নোটিফিকেশনের লেখা ইনপুট বক্সে বসানো (অ্যাপ খোলা থাকলে সঙ্গে সঙ্গে দেখা যায়)
