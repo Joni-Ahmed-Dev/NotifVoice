@@ -31,6 +31,17 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import android.location.Location
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.Worker
+import androidx.work.WorkerParameters
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
+import com.google.android.gms.tasks.Tasks
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -74,6 +85,7 @@ class MainActivity : Activity() {
     private lateinit var logCount: TextView
     private lateinit var logContainer: LinearLayout
     private lateinit var dashView: TextView
+    private lateinit var areaStatus: TextView
     private lateinit var testMsgBox: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -253,6 +265,33 @@ class MainActivity : Activity() {
             text = "ড্যাশবোর্ড রিফ্রেশ করুন"
             setOnClickListener { renderDashboard() }
         }
+        areaStatus = TextView(this).apply { textSize = 13f }
+        val setAreaBtn = Button(this).apply {
+            text = "এরিয়া সেট করুন (এই জায়গাটাকে কেন্দ্র ধরুন)"
+            setOnClickListener { setAreaCenter() }
+        }
+        val areaToggleBtn = Button(this).apply {
+            text = "এরিয়া চালু/বন্ধ করুন"
+            setOnClickListener {
+                val on = !prefs.getBoolean("areaOn", false)
+                prefs.edit().putBoolean("areaOn", on).apply()
+                if (on) {
+                    AreaCheck.schedule(this@MainActivity)
+                    AreaCheck.checkNow(this@MainActivity)
+                } else {
+                    AreaCheck.cancel(this@MainActivity)
+                }
+                renderArea()
+            }
+        }
+        val areaCheckBtn = Button(this).apply {
+            text = "এখনই এরিয়া চেক করুন"
+            setOnClickListener {
+                AreaCheck.checkNow(this@MainActivity)
+                Toast.makeText(this@MainActivity, "চেক চলছে, একটু পর দেখুন", Toast.LENGTH_SHORT).show()
+                areaStatus.postDelayed({ renderArea() }, 10000)
+            }
+        }
 
         root.addView(label("কোন ভয়েস ব্যবহার হবে (ক্রম: আগেরটা না চললে পরেরটা। \"শুধু\" বেছে নিলে ব্যর্থ হলে আর কিছু পড়া হবে না)"))
         root.addView(providerBox)
@@ -285,9 +324,16 @@ class MainActivity : Activity() {
         root.addView(label("সীমা প্রতি Key: RPM ৩, TPM ১০,০০০, RPD ১০। টোকেন API থেকে পাওয়া গেলে সেটা, না পেলে লেখার দৈর্ঘ্য থেকে আনুমানিক।"))
         root.addView(dashView)
         root.addView(dashRefreshBtn)
+        root.addView(label("এরিয়া: নির্দিষ্ট জায়গার বাইরে গেলে পড়া বন্ধ থাকবে"))
+        root.addView(label("৩০ মিনিট পর পর লোকেশন চেক হবে, কেন্দ্র থেকে ৬০০ মিটারের বাইরে গেলে পড়া বন্ধ থাকবে, ফিরে এলে আবার চালু হবে। ইন্টারনেট লাগে না, GPS দিয়েই চলে, ম্যাপের দরকার নেই।"))
+        root.addView(areaStatus)
+        root.addView(setAreaBtn)
+        root.addView(areaToggleBtn)
+        root.addView(areaCheckBtn)
 
         setContentView(scroll)
         refreshSummary()
+        if (prefs.getBoolean("areaOn", false)) AreaCheck.schedule(this)
     }
 
     override fun onPause() {
@@ -301,6 +347,7 @@ class MainActivity : Activity() {
         InputBus.listener = { t -> runOnUiThread { testMsgBox.setText(t) } }
         renderLog()
         renderDashboard()
+        renderArea()
     }
 
     private fun renderLog() {
@@ -438,6 +485,91 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("বাতিল", null)
             .show()
+    }
+
+    private fun renderArea() {
+        val on = prefs.getBoolean("areaOn", false)
+        val lat = prefs.getString("areaLat", null)?.toDoubleOrNull()
+        val radius = prefs.getInt("areaRadius", AreaCheck.RADIUS_M)
+        val lastCheck = prefs.getLong("areaLastCheck", 0L)
+        val lastDist = prefs.getInt("areaLastDist", -1)
+        val timeStr = if (lastCheck > 0) SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date(lastCheck)) else "এখনো চেক হয়নি"
+        areaStatus.text = when {
+            !on -> "এরিয়া বন্ধ আছে। চালু করলে ৩০ মিনিট পর পর চেক হবে, $radius মিটারের বাইরে গেলে পড়া বন্ধ থাকবে।"
+            lat == null -> "এরিয়া চালু আছে, কিন্তু কেন্দ্র সেট করা হয়নি। উপরের বোতাম চেপে এই জায়গাটাকে কেন্দ্র করুন।"
+            else -> {
+                val inside = prefs.getBoolean("areaInside", true)
+                "এরিয়া চালু আছে ($radius মিটার)। এখন: " + (if (inside) "ভেতরে আছো" else "বাইরে আছো") +
+                    "\nশেষ চেক: $timeStr" + (if (lastDist >= 0) ", কেন্দ্র থেকে দূরত্ব: $lastDist মিটার" else "")
+            }
+        }
+    }
+
+    /** এই জায়গাটাকেই এরিয়ার কেন্দ্র ধরা: GPS থেকে নতুন লোকেশন নিয়ে সেভ করা। */
+    private fun setAreaCenter() {
+        if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                arrayOf(
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                    android.Manifest.permission.ACCESS_COARSE_LOCATION
+                ), 2
+            )
+            Toast.makeText(this, "লোকেশন অনুমতি দিন, তারপর আবার চাপুন", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "লোকেশন নেওয়া হচ্ছে...", Toast.LENGTH_SHORT).show()
+        Thread {
+            val client = LocationServices.getFusedLocationProviderClient(this)
+            val loc: Location? = try {
+                Tasks.await(
+                    client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, CancellationTokenSource().token),
+                    25, TimeUnit.SECONDS
+                )
+            } catch (e: Exception) {
+                null
+            } ?: try {
+                Tasks.await(client.lastLocation, 10, TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                null
+            }
+            runOnUiThread {
+                if (loc == null) {
+                    Toast.makeText(this, "লোকেশন পাওয়া যায়নি, GPS চালু করে আবার চাপুন", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                prefs.edit()
+                    .putString("areaLat", loc.latitude.toString())
+                    .putString("areaLng", loc.longitude.toString())
+                    .putInt("areaRadius", AreaCheck.RADIUS_M)
+                    .putBoolean("areaOn", true)
+                    .putBoolean("areaInside", true)
+                    .putLong("areaLastCheck", System.currentTimeMillis())
+                    .putInt("areaLastDist", 0)
+                    .apply()
+                AreaCheck.schedule(this)
+                AreaCheck.checkNow(this)
+                if (Build.VERSION.SDK_INT >= 29 &&
+                    checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    requestPermissions(arrayOf(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION), 3)
+                }
+                Toast.makeText(this, "এরিয়া সেট হয়েছে, ৬০০ মিটার", Toast.LENGTH_SHORT).show()
+                renderArea()
+            }
+        }.start()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 2 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            setAreaCenter()
+        } else if (requestCode == 3) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, "ব্যাকগ্রাউন্ড লোকেশন চালু হয়েছে", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "ব্যাকগ্রাউন্ড লোকেশন না দিলে ৩০ মিনিটের চেক চলবে না, সেটিংস থেকে লোকেশন সবসময় দিন", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 }
 
@@ -830,6 +962,76 @@ object Speaker {
     }
 }
 
+/**
+ * এরিয়া চেক: ৩০ মিনিট পর পর GPS লোকেশন নিয়ে কেন্দ্র থেকে দূরত্ব মাপে।
+ * ইন্টারনেট লাগে না, ম্যাপও লাগে না, শুধু GPS আর দূরত্বের হিসাব।
+ * লোকেশন না পাওয়া গেলে আগের অবস্থাই থাকে (পড়া চালু থাকে), যাতে ভুলে সব বন্ধ না হয়।
+ */
+object AreaCheck {
+    const val RADIUS_M = 600
+    const val INTERVAL_MIN = 30L
+
+    fun schedule(ctx: Context) {
+        val req = PeriodicWorkRequestBuilder<AreaCheckWorker>(INTERVAL_MIN, TimeUnit.MINUTES).build()
+        WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
+            "area-check", ExistingPeriodicWorkPolicy.UPDATE, req
+        )
+    }
+
+    fun checkNow(ctx: Context) {
+        WorkManager.getInstance(ctx).enqueue(OneTimeWorkRequestBuilder<AreaCheckWorker>().build())
+    }
+
+    fun cancel(ctx: Context) {
+        WorkManager.getInstance(ctx).cancelUniqueWork("area-check")
+    }
+
+    /** এরিয়া চালু আছে, কেন্দ্র সেট আছে, আর শেষ চেক অনুযায়ী বাইরে আছি কি না। */
+    fun isOutside(ctx: Context): Boolean {
+        val prefs = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("areaOn", false)) return false
+        if (prefs.getString("areaLat", null)?.toDoubleOrNull() == null) return false
+        if (prefs.getString("areaLng", null)?.toDoubleOrNull() == null) return false
+        return !prefs.getBoolean("areaInside", true)
+    }
+}
+
+class AreaCheckWorker(appCtx: Context, params: WorkerParameters) : Worker(appCtx, params) {
+    override fun doWork(): Result {
+        val prefs = applicationContext.getSharedPreferences("cfg", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("areaOn", false)) return Result.success()
+        val lat = prefs.getString("areaLat", null)?.toDoubleOrNull() ?: return Result.success()
+        val lng = prefs.getString("areaLng", null)?.toDoubleOrNull() ?: return Result.success()
+        val radius = prefs.getInt("areaRadius", AreaCheck.RADIUS_M)
+        val client = LocationServices.getFusedLocationProviderClient(applicationContext)
+        // আগে নতুন লোকেশন চাওয়া (পুরনো লোকেশন ধরে ভুল সিদ্ধান্ত যাতে না হয়)
+        val fresh: Location? = try {
+            Tasks.await(
+                client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, CancellationTokenSource().token),
+                25, TimeUnit.SECONDS
+            )
+        } catch (e: Exception) {
+            null
+        }
+        // নতুন লোকেশন না পেলে ৪০ মিনিটের ভেতরের শেষ লোকেশন চলবে, তার চেয়ে পুরনো হলে নয়
+        val use: Location? = fresh ?: try {
+            val last = Tasks.await(client.lastLocation, 10, TimeUnit.SECONDS)
+            if (last != null && System.currentTimeMillis() - last.time < 40 * 60 * 1000L) last else null
+        } catch (e: Exception) {
+            null
+        }
+        if (use == null) return Result.success()
+        val res = FloatArray(1)
+        Location.distanceBetween(lat, lng, use.latitude, use.longitude, res)
+        prefs.edit()
+            .putBoolean("areaInside", res[0] <= radius)
+            .putLong("areaLastCheck", System.currentTimeMillis())
+            .putInt("areaLastDist", res[0].toInt())
+            .apply()
+        return Result.success()
+    }
+}
+
 class NotifVoiceService : NotificationListenerService() {
 
     // অডিও আনা একসাথে (২টা পর্যন্ত), বাজানো এক এক করে নোটিফিকেশনের ক্রমে
@@ -865,6 +1067,15 @@ class NotifVoiceService : NotificationListenerService() {
         if (Speaker.isMuted(this)) {
             val t = SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())
             saveLog("$t  অ্যাপ: ${sbn.packageName}\nবার্তা: ${message.take(100)}\nফলাফল: রিংটোন সাইলেন্ট/ভলিউম শূন্য, তাই পড়া হয়নি")
+            return
+        }
+
+        // এরিয়ার বাইরে থাকলে পড়া হবে না (API-ও ডাকা হবে না), লেখাটা শুধু ইনপুট বক্সে থাকবে
+        if (AreaCheck.isOutside(this)) {
+            prefs.edit().putString("inbox", message).apply()
+            InputBus.listener?.invoke(message)
+            val t = SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())
+            saveLog("$t  অ্যাপ: ${sbn.packageName}\nবার্তা: ${message.take(100)}\nফলাফল: এরিয়ার বাইরে থাকায় পড়া হয়নি")
             return
         }
 
