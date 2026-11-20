@@ -1063,6 +1063,13 @@ class NotifVoiceService : NotificationListenerService() {
         val message = body.ifBlank { title }
         if (message.isBlank()) return
 
+        // "on a voice call" লেখা থাকলে একদম বাদ, কখনো পড়া হবে না (API-ও ডাকা হবে না)
+        if (message.contains("on a voice call", ignoreCase = true)) {
+            val t = SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())
+            saveLog("$t  অ্যাপ: ${sbn.packageName}\nবার্তা: ${message.take(100)}\nফলাফল: 'on a voice call' থাকায় ব্লক করা হয়েছে, পড়া হয়নি")
+            return
+        }
+
         // রিংটোন সাইলেন্ট বা ভলিউম শূন্য হলে কিছুই পড়া হবে না (API-ও ডাকা হবে না)
         if (Speaker.isMuted(this)) {
             val t = SimpleDateFormat("dd/MM HH:mm", Locale.US).format(Date())
